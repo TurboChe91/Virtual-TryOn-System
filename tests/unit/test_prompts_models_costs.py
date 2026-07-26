@@ -137,8 +137,8 @@ class TestCosts:
 class TestRedaction:
     def test_sk_key_redacted(self):
         out = redact("calling with sk-Zz9test0FAKEFAKEfakefake1234567890abcd")
-        assert "sk-Zz9test0FAKEFAKEfakefake1234567890abcd" in out and "<redacted>" in out
-        assert "PDeghp6nocz" not in out
+        assert "sk-Zz9test" in out and "<redacted>" in out
+        assert "1234567890abcd" not in out
 
     def test_bearer_redacted(self):
         out = redact("Authorization: Bearer abcdef123456789012345")
