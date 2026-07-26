@@ -5,101 +5,140 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>设置 · Lunelle Studio</title>
 <style>
-  :root { --bg:#faf7f2; --card:#fff; --line:#e8e2d8; --ink:#2b2620; --sub:#8a8074;
-          --accent:#b07d62; --ok:#3d7a4f; --bad:#b03a3a; }
+  :root {
+    --paper:#f7f6f3; --panel:#fffffe; --hairline:#e4e2dc; --hairline-dark:#d5d2ca;
+    --ink:#22201d; --ink-2:#55524c; --ink-3:#8f8b83;
+    --lacquer:#7c2231; --lacquer-hover:#661b27;
+    --ok:#2f6b45; --err:#a13232;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
   * { box-sizing:border-box; }
-  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
-         background:var(--bg); color:var(--ink); }
-  header { display:flex; align-items:center; gap:16px; padding:14px 24px; background:var(--card);
-           border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
-  header h1 { font-size:17px; margin:0; }
-  header a { margin-left:auto; color:var(--accent); text-decoration:none; font-size:13px; }
-  main { max-width:1100px; margin:0 auto; padding:20px 24px 60px; }
-  section { background:var(--card); border:1px solid var(--line); border-radius:10px;
-            padding:18px 20px; margin-bottom:18px; }
-  h2 { font-size:15px; margin:0 0 6px; }
-  p.desc { color:var(--sub); font-size:13px; margin:0 0 12px; }
-  label { display:block; font-size:12px; color:var(--sub); margin:8px 0 2px; }
-  input, select { width:100%; padding:7px 9px; border:1px solid var(--line);
-    border-radius:6px; font:inherit; background:#fff; }
-  .row { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; }
-  button { padding:7px 14px; border:1px solid var(--accent); background:var(--accent); color:#fff;
-           border-radius:6px; cursor:pointer; font:inherit; }
-  button.ghost { background:#fff; color:var(--accent); }
+  html { -webkit-font-smoothing:antialiased; }
+  body { margin:0; background:var(--paper); color:var(--ink);
+         font:13.5px/1.55 -apple-system,"Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; }
+  header { display:flex; align-items:center; gap:14px; padding:0 32px; height:52px;
+           background:var(--panel); border-bottom:1px solid var(--hairline-dark);
+           position:sticky; top:0; z-index:5; }
+  .wordmark { font-family:Georgia,"Times New Roman","Songti SC",serif; font-size:16px;
+              letter-spacing:.34em; font-weight:600; }
+  .wordmark small { font-size:10px; letter-spacing:.22em; color:var(--ink-3); }
+  header nav { margin-left:auto; }
+  header nav a { color:var(--ink-2); text-decoration:none; font-size:12.5px; }
+  header nav a:hover { color:var(--lacquer); }
+  main { max-width:1080px; margin:0 auto; padding:30px 32px 80px; }
+  h1.page { font-family:Georgia,"Songti SC",serif; font-size:21px; font-weight:600; margin:0 0 22px; }
+  .panel { background:var(--panel); border:1px solid var(--hairline); border-radius:4px;
+           margin-bottom:26px; }
+  .panel .hd { padding:14px 18px 0; }
+  .panel .bd { padding:10px 18px 16px; }
+  .label-cap { font-size:10.5px; letter-spacing:.14em; text-transform:uppercase;
+               color:var(--ink-3); font-weight:600; }
+  p.desc { color:var(--ink-3); font-size:12.5px; margin:4px 0 0; }
+  label { display:block; font-size:12px; color:var(--ink-2); margin:10px 0 3px; }
+  input, select { width:100%; padding:6px 9px; border:1px solid var(--hairline-dark);
+    border-radius:3px; font:inherit; background:#fff; color:var(--ink); }
+  input:focus, select:focus { outline:none; border-color:var(--lacquer); }
+  ::placeholder { color:#b5b1a8; }
+  .row { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  button { font:inherit; cursor:pointer; border-radius:3px; padding:6px 14px;
+           border:1px solid var(--ink); background:var(--ink); color:#fff; }
+  button:hover { background:#000; }
+  button.quiet { background:none; border:1px solid var(--hairline-dark); color:var(--ink-2); }
+  button.quiet:hover { border-color:var(--ink-2); color:var(--ink); }
+  button.link { background:none; border:none; padding:2px 4px; color:var(--lacquer); }
+  button.link:hover { text-decoration:underline; background:none; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
-  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--sub); font-weight:500; font-size:12px; }
-  .pill { display:inline-block; padding:1px 9px; border-radius:20px; font-size:12px; color:#fff; background:var(--ok); }
-  .muted { color:var(--sub); }
+  th { text-align:left; padding:7px 10px; color:var(--ink-3); font-weight:600;
+       font-size:10.5px; letter-spacing:.12em; text-transform:uppercase;
+       border-bottom:1px solid var(--hairline-dark); }
+  td { padding:8px 10px; border-bottom:1px solid var(--hairline); vertical-align:middle; }
+  tr:last-child td { border-bottom:0; }
+  .mono { font-family:var(--mono); font-size:12px; }
+  .live { color:var(--ok); font-size:12.5px; white-space:nowrap; }
+  .live::before { content:""; display:inline-block; width:7px; height:7px; border-radius:50%;
+                  background:var(--ok); margin-right:6px; vertical-align:1px; }
+  .muted { color:var(--ink-3); }
   .flex { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  .tones { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
-  .tone { border:1px solid var(--line); border-radius:10px; padding:12px; text-align:center; background:var(--bg); }
-  .tone img { max-width:100%; max-height:140px; border-radius:6px; border:1px solid var(--line); }
-  .tone .empty { color:var(--sub); padding:36px 0; border:1px dashed var(--line); border-radius:6px; }
-  #toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--ink);
-           color:#fff; padding:9px 18px; border-radius:8px; display:none; z-index:20; max-width:80%; }
+  .tones { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; }
+  .tone { border:1px solid var(--hairline); border-radius:4px; padding:12px; text-align:center; }
+  .tone img { max-width:100%; max-height:130px; border-radius:3px; border:1px solid var(--hairline); }
+  .tone .empty { color:var(--ink-3); padding:34px 0; border:1px dashed var(--hairline-dark);
+                 border-radius:3px; font-size:12px; }
+  .tone .nm { margin-bottom:8px; }
+  .tone .nm b { font-weight:600; }
+  .tone .nm span { color:var(--ink-3); font-size:11.5px; margin-left:5px; }
+  #toast { position:fixed; bottom:22px; left:50%; transform:translateX(-50%);
+           background:var(--ink); color:#f4f2ee; padding:9px 20px; border-radius:3px;
+           display:none; z-index:20; max-width:78%; font-size:12.5px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>⚙ 设置</h1>
-  <a href="/">← 返回工作台</a>
+  <span class="wordmark">LUNELLE <small>STUDIO</small></span>
+  <nav><a href="/">返回工作台</a></nav>
 </header>
 <main>
-  <section>
-    <h2>管理口令</h2>
-    <p class="desc">服务端设置了 LUNELLE_ADMIN_TOKEN 时，所有写操作需要此口令；只保存在当前浏览器。</p>
-    <div class="row"><div>
-      <input id="adminToken" type="password" placeholder="X-Admin-Token（未设置可留空）">
-    </div></div>
-  </section>
+  <h1 class="page">设置</h1>
 
-  <section>
-    <h2>生图通道</h2>
-    <p class="desc">出图任务走「已激活」的通道；都未激活时回退 .env。密钥只存本机数据库，界面仅显示末四位。</p>
-    <table id="imgProfiles"><thead><tr>
-      <th>名称</th><th>Base URL</th><th>模型</th><th>参考图</th><th>mask</th><th>单价$</th><th>密钥</th><th>状态</th><th></th>
-    </tr></thead><tbody></tbody></table>
-    <div class="row" style="margin-top:12px">
-      <div><label>名称</label><input id="ip_name" placeholder="official-openai"></div>
-      <div><label>Base URL</label><input id="ip_base" placeholder="https://api.openai.com/v1"></div>
-      <div><label>API Key</label><input id="ip_key" type="password" placeholder="sk-..."></div>
-      <div><label>模型</label><input id="ip_model" placeholder="gpt-image-2"></div>
-      <div><label>参考图模式</label><select id="ip_refmode">
-        <option value="auto">auto</option><option value="openai-edits">openai-edits</option>
-        <option value="seedream">seedream</option><option value="off">off</option></select></div>
-      <div><label>单价 USD/图（可空）</label><input id="ip_price" placeholder="0.19"></div>
+  <div class="panel">
+    <div class="hd"><span class="label-cap">管理口令</span>
+      <p class="desc">服务端设置了 LUNELLE_ADMIN_TOKEN 时，写操作需携带此口令；仅保存在当前浏览器。</p></div>
+    <div class="bd" style="max-width:420px">
+      <input id="adminToken" type="password" placeholder="未设置可留空">
     </div>
-    <div class="flex" style="margin-top:10px">
-      <label style="margin:0"><input type="checkbox" id="ip_mask" style="width:auto"> 支持 mask 局部修补</label>
-      <button onclick="createProfile('image')">添加生图通道</button>
-      <button class="ghost" onclick="deactivate('image')">停用（回退 .env）</button>
-    </div>
-  </section>
+  </div>
 
-  <section>
-    <h2>识别用 LLM 通道</h2>
-    <p class="desc">用于「传图自动识别款式」和「AI 识别十甲身份」，需要视觉多模态模型（如 GPT-5.x、gemini 等，OpenAI 兼容 chat/completions 格式）。</p>
-    <table id="llmProfiles"><thead><tr>
-      <th>名称</th><th>Base URL</th><th>模型</th><th>密钥</th><th>状态</th><th></th>
-    </tr></thead><tbody></tbody></table>
-    <div class="row" style="margin-top:12px">
-      <div><label>名称</label><input id="lp_name" placeholder="vision-llm"></div>
-      <div><label>Base URL</label><input id="lp_base" placeholder="https://api.example.com/v1"></div>
-      <div><label>API Key</label><input id="lp_key" type="password" placeholder="sk-..."></div>
-      <div><label>模型</label><input id="lp_model" placeholder="gpt-5.6-sol"></div>
+  <div class="panel">
+    <div class="hd"><span class="label-cap">生图通道</span>
+      <p class="desc">出图走「使用中」的通道；都未启用时回退 .env 配置。密钥仅存本机数据库，界面只显示末四位。</p></div>
+    <div class="bd">
+      <table id="imgProfiles"><thead><tr>
+        <th>名称</th><th>Base URL</th><th>模型</th><th>参考图</th><th>mask</th><th>单价</th><th>密钥</th><th></th><th></th>
+      </tr></thead><tbody></tbody></table>
+      <div class="row" style="margin-top:14px">
+        <div><label>名称</label><input id="ip_name" placeholder="official-openai"></div>
+        <div><label>Base URL</label><input id="ip_base" placeholder="https://api.openai.com/v1"></div>
+        <div><label>API Key</label><input id="ip_key" type="password" placeholder="sk-…"></div>
+        <div><label>模型</label><input id="ip_model" placeholder="gpt-image-2"></div>
+        <div><label>参考图模式</label><select id="ip_refmode">
+          <option value="auto">auto</option><option value="openai-edits">openai-edits</option>
+          <option value="seedream">seedream</option><option value="off">off</option></select></div>
+        <div><label>单价 USD／图</label><input id="ip_price" placeholder="选填"></div>
+      </div>
+      <div class="flex" style="margin-top:12px">
+        <label style="margin:0; display:flex; align-items:center; gap:6px">
+          <input type="checkbox" id="ip_mask" style="width:auto"> 支持 mask 局部修补</label>
+        <button onclick="createProfile('image')">添加</button>
+        <button class="quiet" onclick="deactivate('image')">停用全部</button>
+      </div>
     </div>
-    <div class="flex" style="margin-top:10px">
-      <button onclick="createProfile('llm')">添加 LLM 通道</button>
-      <button class="ghost" onclick="deactivate('llm')">停用（回退 .env 文本模型）</button>
-    </div>
-  </section>
+  </div>
 
-  <section>
-    <h2>四肤色手模底图</h2>
-    <p class="desc">试戴矩阵与佩戴图的姿势/肤色权威底图；每个肤色一张（建议同一手模、同一机位）。</p>
-    <div class="tones" id="tones"></div>
-  </section>
+  <div class="panel">
+    <div class="hd"><span class="label-cap">识别与验收模型</span>
+      <p class="desc">用于按图建款、十甲身份识别与出图后的自动验收；需视觉多模态模型，OpenAI 兼容 chat 接口。</p></div>
+    <div class="bd">
+      <table id="llmProfiles"><thead><tr>
+        <th>名称</th><th>Base URL</th><th>模型</th><th>密钥</th><th></th><th></th>
+      </tr></thead><tbody></tbody></table>
+      <div class="row" style="margin-top:14px">
+        <div><label>名称</label><input id="lp_name" placeholder="vision"></div>
+        <div><label>Base URL</label><input id="lp_base" placeholder="https://api.example.com/v1"></div>
+        <div><label>API Key</label><input id="lp_key" type="password" placeholder="sk-…"></div>
+        <div><label>模型</label><input id="lp_model" placeholder="gpt-5.6-sol"></div>
+      </div>
+      <div class="flex" style="margin-top:12px">
+        <button onclick="createProfile('llm')">添加</button>
+        <button class="quiet" onclick="deactivate('llm')">停用全部</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="hd"><span class="label-cap">手模底图</span>
+      <p class="desc">佩戴图与试戴矩阵的姿势与肤色基准，四种肤色各一张；建议同一手模、同一机位。</p></div>
+    <div class="bd"><div class="tones" id="tones"></div></div>
+  </div>
 </main>
 <div id="toast"></div>
 
@@ -127,29 +166,30 @@ async function loadProfiles(){
   const out = await api('/api/profiles');
   const img = out.profiles.filter(p => p.kind !== 'llm');
   const llm = out.profiles.filter(p => p.kind === 'llm');
+  const act = p => p.is_active ? '<span class="live">使用中</span>' : '';
+  const ops = p => `
+    ${p.is_active ? '' : `<button class="link" onclick="activate('${p.profile_id}')">启用</button>`}
+    <button class="link" onclick="testProfile('${p.profile_id}')">测试</button>
+    ${p.is_active ? '' : `<button class="link" onclick="del('${p.profile_id}')">删除</button>`}`;
   $('#imgProfiles tbody').innerHTML = img.map(p => `<tr>
-    <td>${esc(p.name)}</td><td class="muted">${esc(p.base_url)}</td><td>${esc(p.model)}</td>
+    <td>${esc(p.name)}</td>
+    <td class="mono muted">${esc(p.base_url)}</td>
+    <td class="mono">${esc(p.model)}</td>
     <td class="muted">${esc(p.reference_mode)}</td>
-    <td>${p.supports_mask ? '✓' : '—'}</td>
-    <td>${p.price_per_image_usd ?? '—'}</td>
-    <td class="muted">…${esc(p.api_key.last4)}</td>
-    <td>${p.is_active ? '<span class="pill">已激活</span>' : ''}</td>
-    <td class="flex">
-      ${p.is_active ? '' : `<button class="ghost" onclick="activate('${p.profile_id}')">激活</button>`}
-      <button class="ghost" onclick="testProfile('${p.profile_id}')">测试</button>
-      ${p.is_active ? '' : `<button class="ghost" onclick="del('${p.profile_id}')">删除</button>`}
-    </td></tr>`).join('')
-    || `<tr><td colspan="9" class="muted">暂无；当前使用 .env（模型 ${esc(out.env_fallback_model)}）</td></tr>`;
+    <td>${p.supports_mask ? '支持' : '—'}</td>
+    <td class="mono">${p.price_per_image_usd ?? '—'}</td>
+    <td class="mono muted">…${esc(p.api_key.last4)}</td>
+    <td>${act(p)}</td>
+    <td style="text-align:right; white-space:nowrap">${ops(p)}</td></tr>`).join('')
+    || `<tr><td colspan="9" class="muted" style="padding:18px 10px">未配置，当前使用 .env（${esc(out.env_fallback_model)}）</td></tr>`;
   $('#llmProfiles tbody').innerHTML = llm.map(p => `<tr>
-    <td>${esc(p.name)}</td><td class="muted">${esc(p.base_url)}</td><td>${esc(p.model)}</td>
-    <td class="muted">…${esc(p.api_key.last4)}</td>
-    <td>${p.is_active ? '<span class="pill">已激活</span>' : ''}</td>
-    <td class="flex">
-      ${p.is_active ? '' : `<button class="ghost" onclick="activate('${p.profile_id}')">激活</button>`}
-      <button class="ghost" onclick="testProfile('${p.profile_id}')">测试</button>
-      ${p.is_active ? '' : `<button class="ghost" onclick="del('${p.profile_id}')">删除</button>`}
-    </td></tr>`).join('')
-    || `<tr><td colspan="6" class="muted">暂无；当前回退 .env 文本模型${out.env_fallback_llm ? '（'+esc(out.env_fallback_llm)+'）' : '（未配置——识别功能不可用）'}</td></tr>`;
+    <td>${esc(p.name)}</td>
+    <td class="mono muted">${esc(p.base_url)}</td>
+    <td class="mono">${esc(p.model)}</td>
+    <td class="mono muted">…${esc(p.api_key.last4)}</td>
+    <td>${act(p)}</td>
+    <td style="text-align:right; white-space:nowrap">${ops(p)}</td></tr>`).join('')
+    || `<tr><td colspan="6" class="muted" style="padding:18px 10px">未配置${out.env_fallback_llm ? '，回退 .env（'+esc(out.env_fallback_llm)+'）' : '——识别与自动验收暂不可用'}</td></tr>`;
 }
 async function createProfile(kind){
   const p = kind === 'llm'
@@ -162,28 +202,28 @@ async function createProfile(kind){
     p.price_per_image_usd = parseFloat($('#ip_price').value.trim());
   try {
     await api('/api/profiles', {method:'POST', body: JSON.stringify(p)});
-    toast('已添加（点「激活」后生效）');
+    toast('已添加，启用后生效');
     if (kind === 'llm') $('#lp_key').value=''; else $('#ip_key').value='';
     loadProfiles();
-  } catch(e){ toast('添加失败: ' + e.message, 6000); }
+  } catch(e){ toast('添加失败：' + e.message, 6000); }
 }
 async function activate(id){
   try { await api(`/api/profiles/${id}/activate`, {method:'POST', body:'{}'});
-    toast('已激活'); loadProfiles(); }
-  catch(e){ toast('激活失败: ' + e.message, 6000); }
+    toast('已启用'); loadProfiles(); }
+  catch(e){ toast('启用失败：' + e.message, 6000); }
 }
 async function testProfile(id){
   toast('测试中…', 15000);
   try {
     const r = await api(`/api/profiles/${id}/test`, {method:'POST', body:'{}'});
-    if (r.ok) toast(`连通 ✓ 列出 ${r.models_listed} 个模型` +
-      (r.configured_model_present===false ? '，但配置的模型不在列表里！' :
-       r.configured_model_present===true ? '，配置的模型在列 ✓' : ''), 8000);
-    else toast(`测试失败（${r.stage}）: ${r.detail || 'HTTP '+r.http_status}`, 8000);
-  } catch(e){ toast('测试失败: ' + e.message, 6000); }
+    if (r.ok) toast(`连通正常，列出 ${r.models_listed} 个模型` +
+      (r.configured_model_present===false ? '；注意：配置的模型不在列表内' :
+       r.configured_model_present===true ? '；配置的模型可用' : ''), 8000);
+    else toast(`测试未通过（${r.stage}）：${r.detail || 'HTTP '+r.http_status}`, 8000);
+  } catch(e){ toast('测试失败：' + e.message, 6000); }
 }
 async function del(id){
-  if (!confirm('删除该通道配置？')) return;
+  if (!confirm('删除该通道？')) return;
   const headers = token() ? {'X-Admin-Token': token()} : {};
   const res = await fetch('/api/profiles/'+id, {method:'DELETE', headers});
   if (res.ok || res.status === 204) { toast('已删除'); loadProfiles(); }
@@ -192,10 +232,10 @@ async function del(id){
 async function deactivate(kind){
   try { await api('/api/profiles/deactivate?kind='+kind, {method:'POST', body:'{}'});
     toast('已停用，回退 .env'); loadProfiles(); }
-  catch(e){ toast('操作失败: ' + e.message, 6000); }
+  catch(e){ toast('操作失败：' + e.message, 6000); }
 }
 
-const TONES = [['light','浅肤色'],['medium','中等肤色'],['tan','小麦肤色'],['deep','深肤色']];
+const TONES = [['light','浅'],['medium','中'],['tan','小麦'],['deep','深']];
 const tonePicker = document.createElement('input');
 tonePicker.type = 'file'; tonePicker.accept = 'image/png,image/jpeg,image/webp';
 tonePicker.style.display = 'none'; document.body.appendChild(tonePicker);
@@ -204,12 +244,12 @@ async function loadTones(){
   $('#tones').innerHTML = TONES.map(([tone, label]) => {
     const configured = out.hand_models[tone] && out.hand_models[tone].configured;
     return `<div class="tone">
-      <div style="margin-bottom:8px"><b>${label}</b> <span class="muted">${tone}</span></div>
+      <div class="nm"><b>${label}肤色</b><span class="mono">${tone}</span></div>
       ${configured
         ? `<img src="/api/settings/hand-models/${tone}/image?t=${Date.now()}">`
         : '<div class="empty">未配置</div>'}
       <div style="margin-top:8px">
-        <button class="ghost" onclick="uploadTone('${tone}')">${configured?'替换':'上传'}</button>
+        <button class="quiet" onclick="uploadTone('${tone}')">${configured?'替换':'上传'}</button>
       </div></div>`;
   }).join('');
 }
@@ -222,8 +262,8 @@ function uploadTone(tone){
       const res = await fetch(`/api/settings/hand-models/${tone}`, {method:'POST', body: fd, headers});
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || body.detail || ('HTTP '+res.status));
-      toast(`${tone} 手模已保存`); loadTones();
-    } catch(e){ toast('上传失败: ' + e.message, 6000); }
+      toast('已保存'); loadTones();
+    } catch(e){ toast('上传失败：' + e.message, 6000); }
     tonePicker.value = '';
   };
   tonePicker.click();

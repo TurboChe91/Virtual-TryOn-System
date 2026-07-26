@@ -5,134 +5,206 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lunelle Studio</title>
 <style>
-  :root { --bg:#faf7f2; --card:#fff; --line:#e8e2d8; --ink:#2b2620; --sub:#8a8074;
-          --accent:#b07d62; --ok:#3d7a4f; --bad:#b03a3a; --warn:#a1770a; }
+  :root {
+    --paper:#f7f6f3; --panel:#fffffe; --hairline:#e4e2dc; --hairline-dark:#d5d2ca;
+    --ink:#22201d; --ink-2:#55524c; --ink-3:#8f8b83;
+    --lacquer:#7c2231; --lacquer-hover:#661b27;
+    --ok:#2f6b45; --err:#a13232; --warn:#93690f; --info:#3d5f8a;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
   * { box-sizing:border-box; }
-  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
-         background:var(--bg); color:var(--ink); }
-  header { display:flex; align-items:center; gap:16px; padding:14px 24px; background:var(--card);
-           border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
-  header h1 { font-size:17px; margin:0; letter-spacing:.5px; }
-  header .sub { color:var(--sub); font-size:12px; }
-  header a.settings { margin-left:auto; color:var(--accent); text-decoration:none; font-size:13px; }
-  main { max-width:1100px; margin:0 auto; padding:20px 24px 60px; }
-  section { background:var(--card); border:1px solid var(--line); border-radius:10px;
-            padding:18px 20px; margin-bottom:18px; }
-  h2 { font-size:15px; margin:0 0 12px; }
-  label { display:block; font-size:12px; color:var(--sub); margin:8px 0 2px; }
-  input, textarea, select { width:100%; padding:7px 9px; border:1px solid var(--line);
-    border-radius:6px; font:inherit; background:#fff; }
-  textarea { resize:vertical; min-height:56px; }
-  .row { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; }
-  button { padding:7px 14px; border:1px solid var(--accent); background:var(--accent); color:#fff;
-           border-radius:6px; cursor:pointer; font:inherit; }
-  button.ghost { background:#fff; color:var(--accent); }
-  button:disabled { opacity:.5; cursor:default; }
-  .tabs { display:flex; gap:0; margin-bottom:14px; border-bottom:1px solid var(--line); }
-  .tabs button { border:none; background:none; color:var(--sub); border-radius:0;
-                 padding:8px 16px; border-bottom:2px solid transparent; }
-  .tabs button.on { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
-  .dropzone { border:2px dashed var(--line); border-radius:10px; padding:26px; text-align:center;
-              color:var(--sub); cursor:pointer; }
-  .dropzone:hover { border-color:var(--accent); color:var(--accent); }
+  html { -webkit-font-smoothing:antialiased; }
+  body { margin:0; background:var(--paper); color:var(--ink);
+         font:13.5px/1.55 -apple-system,"Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; }
+
+  header { display:flex; align-items:baseline; gap:14px; padding:0 32px; height:52px;
+           background:var(--panel); border-bottom:1px solid var(--hairline-dark);
+           position:sticky; top:0; z-index:5; align-items:center; }
+  .wordmark { font-family:Georgia,"Times New Roman","Songti SC",serif; font-size:16px;
+              letter-spacing:.34em; font-weight:600; padding-right:2px; }
+  .wordmark small { font-size:10px; letter-spacing:.22em; color:var(--ink-3); font-family:inherit; }
+  header nav { margin-left:auto; display:flex; gap:22px; }
+  header nav a { color:var(--ink-2); text-decoration:none; font-size:12.5px; }
+  header nav a:hover { color:var(--lacquer); }
+
+  main { max-width:1180px; margin:0 auto; padding:30px 32px 80px; }
+  .cols { display:grid; grid-template-columns:360px 1fr; gap:26px; align-items:start; }
+  @media (max-width:900px){ .cols { grid-template-columns:1fr; } }
+
+  .panel { background:var(--panel); border:1px solid var(--hairline); border-radius:4px; }
+  .panel .hd { padding:12px 18px 0; }
+  .panel .bd { padding:12px 18px 16px; }
+  .label-cap { font-size:10.5px; letter-spacing:.14em; text-transform:uppercase;
+               color:var(--ink-3); font-weight:600; }
+
+  label { display:block; font-size:12px; color:var(--ink-2); margin:10px 0 3px; }
+  input, textarea, select { width:100%; padding:6px 9px; border:1px solid var(--hairline-dark);
+    border-radius:3px; font:inherit; background:#fff; color:var(--ink); }
+  input:focus, textarea:focus, select:focus { outline:none; border-color:var(--lacquer); }
+  textarea { resize:vertical; min-height:64px; }
+  ::placeholder { color:#b5b1a8; }
+
+  button { font:inherit; cursor:pointer; border-radius:3px; padding:6px 14px;
+           border:1px solid var(--ink); background:var(--ink); color:#fff; }
+  button:hover { background:#000; }
+  button.quiet { background:none; border:1px solid var(--hairline-dark); color:var(--ink-2); }
+  button.quiet:hover { border-color:var(--ink-2); color:var(--ink); }
+  button.link { background:none; border:none; padding:2px 4px; color:var(--lacquer); }
+  button.link:hover { text-decoration:underline; background:none; }
+  button.primary { background:var(--lacquer); border-color:var(--lacquer); }
+  button.primary:hover { background:var(--lacquer-hover); }
+  button:disabled { opacity:.45; cursor:default; }
+
+  .tabs { display:flex; gap:18px; border-bottom:1px solid var(--hairline); padding:0 18px; }
+  .tabs button { border:none; background:none; color:var(--ink-3); padding:10px 2px 8px;
+                 border-bottom:2px solid transparent; border-radius:0; font-size:13px; }
+  .tabs button:hover { color:var(--ink); background:none; }
+  .tabs button.on { color:var(--ink); border-bottom-color:var(--lacquer); font-weight:600; }
+
+  .drop { border:1px dashed var(--hairline-dark); border-radius:3px; padding:22px 16px;
+          text-align:center; color:var(--ink-3); cursor:pointer; font-size:12.5px; }
+  .drop:hover { border-color:var(--lacquer); color:var(--lacquer); }
+
   table { width:100%; border-collapse:collapse; font-size:13px; }
-  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--sub); font-weight:500; font-size:12px; }
-  .pill { display:inline-block; padding:1px 9px; border-radius:20px; font-size:12px; color:#fff; }
-  .pill.success{background:var(--ok)} .pill.failed{background:var(--bad)}
-  .pill.running{background:#3d6ea5} .pill.pending{background:#9a938a}
-  .pill.retrying{background:var(--warn)} .pill.cancelled{background:#6b6156}
-  .chip { display:inline-block; font-size:11px; color:var(--sub); border:1px solid var(--line);
-          border-radius:12px; padding:0 8px; margin-right:4px; }
-  .chip.yes { color:var(--ok); border-color:var(--ok); }
-  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; margin-bottom:6px; }
-  .card { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
-  .card b { display:block; font-size:20px; }
-  .card span { color:var(--sub); font-size:12px; }
-  .styleGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:12px; }
-  .styleCard { border:1px solid var(--line); border-radius:10px; padding:14px 16px; background:var(--bg); }
-  .styleCard h3 { margin:0 0 2px; font-size:14px; }
-  .styleCard .sku { color:var(--sub); font-size:12px; margin-bottom:8px; }
-  .styleCard .actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
-  .styleCard .actions button { padding:4px 10px; font-size:12px; }
-  #detail { position:fixed; inset:0; background:rgba(40,33,26,.45); display:none;
-            align-items:flex-start; justify-content:center; padding:40px 16px; overflow:auto; z-index:10; }
-  #detail .box { background:#fff; border-radius:12px; max-width:860px; width:100%; padding:22px 26px; }
-  pre { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px;
-        white-space:pre-wrap; word-break:break-word; font-size:12px; max-height:260px; overflow:auto; }
-  img.preview { max-width:100%; border:1px solid var(--line); border-radius:8px; }
-  .muted { color:var(--sub); }
+  th { text-align:left; padding:7px 10px; color:var(--ink-3); font-weight:600;
+       font-size:10.5px; letter-spacing:.12em; text-transform:uppercase;
+       border-bottom:1px solid var(--hairline-dark); }
+  td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--hairline);
+       vertical-align:middle; }
+  tr:last-child td { border-bottom:0; }
+  tr.rowlink:hover td { background:#faf9f6; }
+  .mono { font-family:var(--mono); font-size:12px; letter-spacing:0; }
+  .num { font-variant-numeric:tabular-nums; }
+
+  .st { white-space:nowrap; font-size:12.5px; }
+  .st::before { content:""; display:inline-block; width:7px; height:7px; border-radius:50%;
+                margin-right:6px; vertical-align:1px; background:var(--ink-3); }
+  .st.success::before { background:var(--ok); }
+  .st.failed::before { background:var(--err); }
+  .st.running::before { background:var(--info); }
+  .st.retrying::before { background:var(--warn); }
+  .st.pending::before { background:none; border:1.5px solid var(--ink-3); width:5px; height:5px; }
+  .st.cancelled { color:var(--ink-3); }
+
+  .asset { font-size:11.5px; color:var(--ink-3); margin-right:10px; white-space:nowrap; }
+  .asset.yes { color:var(--ok); }
+  .asset.yes::before { content:"✓ "; }
+  .asset::before { content:"– "; }
+
+  .stat { display:flex; gap:34px; padding:14px 18px; }
+  .stat div b { display:block; font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .stat div span { font-size:11px; color:var(--ink-3); letter-spacing:.08em; text-transform:uppercase; }
+
+  .toolbar { display:flex; gap:8px; align-items:center; padding:10px 18px;
+             border-bottom:1px solid var(--hairline); flex-wrap:wrap; }
+  .toolbar select { width:auto; }
+  .toolbar .sp { flex:1; }
+
+  #detail { position:fixed; inset:0; background:rgba(28,26,23,.5); display:none;
+            align-items:flex-start; justify-content:center; padding:44px 18px; overflow:auto; z-index:10; }
+  #detail .box { background:var(--panel); border-radius:4px; max-width:820px; width:100%;
+                 padding:24px 28px; border:1px solid var(--hairline-dark); }
+  #detail h2 { font-family:Georgia,"Songti SC",serif; font-size:17px; margin:0; font-weight:600; }
+  #detail h3 { font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+               color:var(--ink-3); margin:22px 0 8px; }
+  pre { background:var(--paper); border:1px solid var(--hairline); border-radius:3px;
+        padding:10px 12px; white-space:pre-wrap; word-break:break-word; font-size:12px;
+        max-height:240px; overflow:auto; font-family:var(--mono); }
+  img.preview { max-width:100%; border:1px solid var(--hairline-dark); border-radius:3px; margin-top:14px; }
+  .muted { color:var(--ink-3); }
   .flex { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  #toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--ink);
-           color:#fff; padding:9px 18px; border-radius:8px; display:none; z-index:20; max-width:80%; }
+  .spread { justify-content:space-between; }
+  h1.page { font-family:Georgia,"Songti SC",serif; font-size:21px; font-weight:600; margin:0 0 22px; }
+
+  #toast { position:fixed; bottom:22px; left:50%; transform:translateX(-50%);
+           background:var(--ink); color:#f4f2ee; padding:9px 20px; border-radius:3px;
+           display:none; z-index:20; max-width:78%; font-size:12.5px; }
+  @media (prefers-reduced-motion:no-preference){
+    #toast { animation:rise .18s ease-out; }
+    @keyframes rise { from { transform:translate(-50%,8px); opacity:0; } }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>Lunelle Studio</h1>
-  <span class="sub">穿戴甲视觉资产工作台</span>
-  <a class="settings" href="/settings">⚙ 设置</a>
+  <span class="wordmark">LUNELLE <small>STUDIO</small></span>
+  <nav>
+    <a href="/settings">设置</a>
+  </nav>
 </header>
 <main>
-  <section>
-    <h2>创建新款式</h2>
-    <div class="tabs">
-      <button id="tabDesc" class="on" onclick="switchTab('desc')">✍ 从描述创建</button>
-      <button id="tabImage" onclick="switchTab('image')">🖼 传图自动识别</button>
-    </div>
-    <div id="paneDesc">
-      <label>用一句话描述你想要的款式（中英文都可以）</label>
-      <textarea id="f_desc" placeholder="奶白色杏仁形指甲，珍珠点缀，细金线和法式甲尖，亮面"></textarea>
-      <div class="row">
-        <div><label>款式名称（可选）</label><input id="f_name" placeholder="Pearl French"></div>
-        <div><label>甲型</label><select id="f_shape"><option value="">自动识别</option>
-          <option>almond</option><option>coffin</option><option>square</option>
-          <option>tapered-square</option><option>squoval</option><option>oval</option>
-          <option>round</option><option>stiletto</option></select></div>
-        <div><label>长度</label><select id="f_length"><option value="">自动识别</option>
-          <option>short</option><option>medium</option><option>long</option><option>extra-long</option></select></div>
-        <div><label>佩戴图肤色</label><select id="f_skin"><option value="">light</option>
-          <option>light</option><option>medium</option><option>tan</option><option>deep</option></select></div>
+  <h1 class="page">款式与出图</h1>
+  <div class="cols">
+    <div>
+      <div class="panel">
+        <div class="tabs">
+          <button id="tabDesc" class="on" onclick="switchTab('desc')">从描述创建</button>
+          <button id="tabImage" onclick="switchTab('image')">按图识别</button>
+        </div>
+        <div class="bd" id="paneDesc">
+          <label>描述想要的款式，中英文均可</label>
+          <textarea id="f_desc" placeholder="奶白色杏仁形，珍珠点缀，细金线与法式甲尖，亮面"></textarea>
+          <label>名称<span class="muted">（可留空）</span></label>
+          <input id="f_name" placeholder="Pearl French">
+          <div class="flex" style="gap:8px">
+            <div style="flex:1"><label>甲型</label><select id="f_shape"><option value="">自动</option>
+              <option>almond</option><option>coffin</option><option>square</option>
+              <option>tapered-square</option><option>squoval</option><option>oval</option>
+              <option>round</option><option>stiletto</option></select></div>
+            <div style="flex:1"><label>长度</label><select id="f_length"><option value="">自动</option>
+              <option>short</option><option>medium</option><option>long</option><option>extra-long</option></select></div>
+            <div style="flex:1"><label>肤色</label><select id="f_skin"><option value="">light</option>
+              <option>light</option><option>medium</option><option>tan</option><option>deep</option></select></div>
+          </div>
+          <div class="flex" style="margin-top:16px">
+            <button class="primary" onclick="createStyle(true)">创建并出图</button>
+            <button class="quiet" onclick="createStyle(false)">仅创建</button>
+          </div>
+          <p class="muted" id="createMsg" style="margin:10px 0 0; font-size:12px"></p>
+        </div>
+        <div class="bd" id="paneImage" style="display:none">
+          <div class="drop" onclick="$('#imgPick').click()">
+            选择设计图（成品照或款式图）<br>
+            <span style="font-size:11.5px">识别颜色、元素与甲型后自动建立款式，原图存为参考图</span>
+          </div>
+          <input id="imgPick" type="file" accept="image/png,image/jpeg,image/webp" style="display:none">
+          <p class="muted" id="imgMsg" style="margin:10px 0 0; font-size:12px"></p>
+        </div>
       </div>
-      <div class="flex" style="margin-top:12px">
-        <button onclick="createStyle(false)">创建款式</button>
-        <button class="ghost" onclick="createStyle(true)">创建并立即出图</button>
-        <span class="muted" id="createMsg"></span>
-      </div>
-    </div>
-    <div id="paneImage" style="display:none">
-      <div class="dropzone" id="dropzone" onclick="$('#imgPick').click()">
-        点击选择设计图（成品照 / 款式图均可）<br>
-        <span style="font-size:12px">AI 会自动识别颜色、元素、甲型并生成款式描述，图片同时保存为该款式的参考图</span>
-      </div>
-      <input id="imgPick" type="file" accept="image/png,image/jpeg,image/webp" style="display:none">
-      <div class="flex" style="margin-top:10px">
-        <span class="muted" id="imgMsg"></span>
-      </div>
-    </div>
-  </section>
 
-  <section>
-    <h2>我的款式</h2>
-    <div class="styleGrid" id="styleGrid"></div>
-  </section>
-
-  <section>
-    <h2>生成进度</h2>
-    <div class="cards" id="statCards"></div>
-    <div class="flex" style="margin:8px 0 10px">
-      <select id="q_status" style="width:130px"><option value="">全部状态</option>
-        <option>pending</option><option>running</option><option>success</option>
-        <option>failed</option><option>retrying</option><option>cancelled</option></select>
-      <select id="q_type" style="width:130px"><option value="">全部类型</option>
-        <option>grid</option><option>wearing</option><option>hero</option></select>
-      <button class="ghost" onclick="loadTasks()">刷新</button>
-      <button class="ghost" onclick="doExport()">📦 导出上架素材包</button>
+      <div class="panel" style="margin-top:26px">
+        <div class="stat" id="statCards"></div>
+      </div>
     </div>
-    <table id="tasksTable"><thead><tr>
-      <th>款式</th><th>类型</th><th>状态</th><th>创建时间</th><th></th>
-    </tr></thead><tbody></tbody></table>
-  </section>
+
+    <div>
+      <div class="panel">
+        <div class="hd flex spread">
+          <span class="label-cap">款式</span>
+        </div>
+        <table id="stylesTable" style="margin-top:8px"><thead><tr>
+          <th style="width:34%">名称 / SKU</th><th>素材</th><th style="width:38%"></th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+
+      <div class="panel" style="margin-top:26px">
+        <div class="toolbar">
+          <span class="label-cap">出图任务</span>
+          <span class="sp"></span>
+          <select id="q_status"><option value="">全部状态</option>
+            <option>pending</option><option>running</option><option>success</option>
+            <option>failed</option><option>retrying</option><option>cancelled</option></select>
+          <select id="q_type"><option value="">全部类型</option>
+            <option>grid</option><option>wearing</option><option>hero</option></select>
+          <button class="quiet" onclick="loadTasks()">刷新</button>
+          <button class="quiet" onclick="doExport()">导出素材包</button>
+        </div>
+        <table id="tasksTable"><thead><tr>
+          <th>SKU</th><th>类型</th><th>状态</th><th>时间</th><th></th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </div>
 </main>
 
 <div id="detail" onclick="if(event.target===this)this.style.display='none'">
@@ -145,6 +217,8 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const token = () => localStorage.getItem('lunelle_token') || '';
 const TYPE_LABEL = {grid:'商品图', wearing:'佩戴图', hero:'上架主图', matrix_cell:'试戴格', repair:'修补'};
+const ST_LABEL = {pending:'排队中', running:'生成中', success:'完成', failed:'失败',
+                  retrying:'重试中', cancelled:'已取消'};
 
 function toast(msg, ms=3500){ const t=$('#toast'); t.textContent=msg; t.style.display='block';
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none', ms); }
@@ -166,7 +240,6 @@ async function upload(path, file){
   if (!res.ok) throw new Error((body && (body.error||body.detail)) || ('HTTP '+res.status));
   return body;
 }
-const csv = v => v.split(',').map(s=>s.trim()).filter(Boolean);
 
 function switchTab(which){
   $('#tabDesc').classList.toggle('on', which==='desc');
@@ -186,29 +259,29 @@ async function createStyle(alsoGenerate){
   };
   try {
     const out = await api('/api/styles', {method:'POST', body: JSON.stringify(body)});
-    let msg = '款式已创建: ' + out.style.sku;
+    let msg = '已创建 ' + out.style.sku;
     if (out.warnings && out.warnings.length) msg += '（' + out.warnings.join('；') + '）';
     if (alsoGenerate) {
       const gen = await api(`/api/styles/${out.style.style_id}/generate`,
         {method:'POST', body: JSON.stringify({output_types:['grid','wearing']})});
-      msg += ' | 已排队 ' + gen.created.length + ' 个出图任务';
+      msg += '，已排队 ' + gen.created.length + ' 个任务';
     }
     $('#createMsg').textContent = msg;
     toast(msg); refreshAll();
-  } catch(e){ toast('创建失败: ' + e.message, 6000); }
+  } catch(e){ toast('创建失败：' + e.message, 6000); }
 }
 
 $('#imgPick').addEventListener('change', async () => {
   if (!$('#imgPick').files.length) return;
-  $('#imgMsg').textContent = 'AI 识别中，请稍候…';
+  $('#imgMsg').textContent = '识别中…';
   try {
     const out = await upload('/api/styles/from-image', $('#imgPick').files[0]);
-    $('#imgMsg').textContent = `已识别并创建: ${out.style.name}（${out.style.sku}）`;
-    toast('识别成功，款式已创建；可在卡片上继续「识别十甲身份」或直接出图', 6000);
+    $('#imgMsg').textContent = `已识别并创建 ${out.style.name}（${out.style.sku}）`;
+    toast('款式已创建，可在列表中继续识别十甲身份或直接出图', 5000);
     refreshAll();
   } catch(e){
     $('#imgMsg').textContent = '';
-    toast('识别失败: ' + e.message, 8000);
+    toast('识别失败：' + e.message, 8000);
   }
   $('#imgPick').value = '';
 });
@@ -218,9 +291,9 @@ async function generateTypes(styleId, types){
     const gen = await api(`/api/styles/${styleId}/generate`,
       {method:'POST', body: JSON.stringify({output_types: types})});
     toast(`已排队 ${gen.created.length} 个任务` +
-      (gen.skipped.length ? `（${gen.skipped.length} 个已有成品被跳过）` : ''));
+      (gen.skipped.length ? `，${gen.skipped.length} 个已有成品未重复生成` : ''));
     loadTasks();
-  } catch(e){ toast('出图失败: ' + e.message, 6000); }
+  } catch(e){ toast('出图失败：' + e.message, 6000); }
 }
 
 const filePicker = document.createElement('input');
@@ -230,34 +303,34 @@ function pickUpload(styleId, kind){
   filePicker.onchange = async () => {
     if (!filePicker.files.length) return;
     try {
-      const out = await upload(`/api/styles/${styleId}/reference-image?kind=${kind}`, filePicker.files[0]);
-      toast(`已上传${kind === 'plan' ? '款式图' : '参考图'}: ${out.stored}`);
+      await upload(`/api/styles/${styleId}/reference-image?kind=${kind}`, filePicker.files[0]);
+      toast(kind === 'plan' ? '款式图已上传' : '参考图已上传');
       loadStyles();
-    } catch(e){ toast('上传失败: ' + e.message, 6000); }
+    } catch(e){ toast('上传失败：' + e.message, 6000); }
     filePicker.value = '';
   };
   filePicker.click();
 }
 
 async function identifyStyle(styleId){
-  toast('AI 正在逐指识别十甲身份…', 20000);
+  toast('正在逐指识别…', 20000);
   try {
     const out = await api(`/api/styles/${styleId}/identify`, {method:'POST', body:'{}'});
-    toast('十甲身份已生成并保存（来源: ' + out.source + '）', 6000);
+    toast('十甲身份已生成（来源 ' + out.source + '）', 5000);
     loadStyles();
-  } catch(e){ toast('识别失败: ' + e.message, 8000); }
+  } catch(e){ toast('识别失败：' + e.message, 8000); }
 }
 
 async function editIdentity(styleId){
   let current = '';
   try { const s = await api('/api/styles/' + styleId); current = s.style.identity_text || ''; } catch(e){}
   $('#detailBox').innerHTML = `
-    <h2 style="margin-top:0">十甲身份</h2>
-    <p class="muted">逐指描述设计（nail-01..nail-10）；生成上架主图时以此为准。可点「AI 识别」自动生成后再修改。</p>
-    <textarea id="identityText" style="min-height:220px">${esc(current)}</textarea>
-    <div class="flex" style="margin-top:10px">
+    <h2>十甲身份</h2>
+    <p class="muted" style="font-size:12.5px">逐指描述设计（nail-01 至 nail-10）；生成上架主图与自动验收时以此为准。</p>
+    <textarea id="identityText" style="min-height:220px; font-family:var(--mono); font-size:12px">${esc(current)}</textarea>
+    <div class="flex" style="margin-top:12px">
       <button onclick="saveIdentity('${styleId}')">保存</button>
-      <button class="ghost" onclick="$('#detail').style.display='none'">取消</button>
+      <button class="quiet" onclick="$('#detail').style.display='none'">取消</button>
     </div>`;
   $('#detail').style.display = 'flex';
 }
@@ -266,30 +339,32 @@ async function saveIdentity(styleId){
     await api(`/api/styles/${styleId}/identity`,
       {method:'PUT', body: JSON.stringify({identity_text: $('#identityText').value})});
     toast('已保存'); $('#detail').style.display='none'; loadStyles();
-  } catch(e){ toast('保存失败: ' + e.message, 6000); }
+  } catch(e){ toast('保存失败：' + e.message, 6000); }
 }
 
 async function loadStyles(){
   const out = await api('/api/styles');
-  $('#styleGrid').innerHTML = out.styles.map(s => {
+  $('#stylesTable tbody').innerHTML = out.styles.map(s => {
     const spec = s.spec || {};
-    return `<div class="styleCard">
-      <h3>${esc(s.name)}</h3>
-      <div class="sku">${esc(s.sku)} · ${esc(spec.shape)} / ${esc(spec.length)}</div>
-      <div>
-        <span class="chip ${s.plan_image_path?'yes':''}">款式图${s.plan_image_path?' ✓':''}</span>
-        <span class="chip ${s.reference_image_path?'yes':''}">参考图${s.reference_image_path?' ✓':''}</span>
-        <span class="chip ${s.identity_text?'yes':''}">十甲身份${s.identity_text?' ✓':''}</span>
-      </div>
-      <div class="actions">
-        <button onclick="generateTypes('${s.style_id}',['grid','wearing'])">出商品图+佩戴图</button>
-        <button class="ghost" onclick="generateTypes('${s.style_id}',['hero'])">出上架主图</button>
-        <button class="ghost" onclick="identifyStyle('${s.style_id}')">AI 识别十甲身份</button>
-        <button class="ghost" onclick="pickUpload('${s.style_id}','plan')">传款式图</button>
-        <button class="ghost" onclick="pickUpload('${s.style_id}','reference')">传参考图</button>
-        <button class="ghost" onclick="editIdentity('${s.style_id}')">编辑身份</button>
-      </div></div>`;
-  }).join('') || '<p class="muted">还没有款式——用上面的两种方式创建第一个吧。</p>';
+    return `<tr>
+      <td>
+        <div>${esc(s.name)}</div>
+        <div class="mono muted">${esc(s.sku)} · ${esc(spec.shape)} · ${esc(spec.length)}</div>
+      </td>
+      <td>
+        <span class="asset ${s.plan_image_path?'yes':''}">款式图</span>
+        <span class="asset ${s.reference_image_path?'yes':''}">参考图</span>
+        <span class="asset ${s.identity_text?'yes':''}">十甲身份</span>
+      </td>
+      <td style="text-align:right; white-space:nowrap">
+        <button class="link" onclick="generateTypes('${s.style_id}',['grid','wearing'])">出图</button>
+        <button class="link" onclick="generateTypes('${s.style_id}',['hero'])">主图</button>
+        <button class="link" onclick="identifyStyle('${s.style_id}')">识别身份</button>
+        <button class="link" onclick="pickUpload('${s.style_id}','plan')">款式图</button>
+        <button class="link" onclick="pickUpload('${s.style_id}','reference')">参考图</button>
+        <button class="link" onclick="editIdentity('${s.style_id}')">身份</button>
+      </td></tr>`;
+  }).join('') || '<tr><td colspan="3" class="muted" style="padding:22px 10px">还没有款式。左侧任选一种方式创建。</td></tr>';
 }
 
 async function loadTasks(){
@@ -297,57 +372,60 @@ async function loadTasks(){
   if ($('#q_status').value) p.set('status', $('#q_status').value);
   if ($('#q_type').value) p.set('output_type', $('#q_type').value);
   const out = await api('/api/tasks?' + p);
-  $('#tasksTable tbody').innerHTML = out.tasks.map(t => `<tr>
-    <td>${esc(t.sku)}</td>
+  $('#tasksTable tbody').innerHTML = out.tasks.map(t => `<tr class="rowlink">
+    <td class="mono">${esc(t.sku)}</td>
     <td>${esc(TYPE_LABEL[t.output_type]||t.output_type)}</td>
-    <td><span class="pill ${esc(t.status)}">${esc(t.status)}</span>
-        ${t.error_code?`<span class="muted" style="font-size:11px"> ${esc(t.error_code)}</span>`:''}</td>
-    <td class="muted">${esc((t.created_at||'').replace('T',' ').replace('Z',''))}</td>
-    <td class="flex">
-      <button class="ghost" onclick="showTask('${t.task_id}')">${t.status==='success'?'查看成品':'详情'}</button>
+    <td><span class="st ${esc(t.status)}">${esc(ST_LABEL[t.status]||t.status)}</span>${
+      t.error_code?` <span class="mono muted" style="font-size:11px">${esc(t.error_code)}</span>`:''}</td>
+    <td class="mono muted num">${esc((t.created_at||'').replace('T',' ').replace('Z','').slice(5,16))}</td>
+    <td style="text-align:right; white-space:nowrap">
+      <button class="link" onclick="showTask('${t.task_id}')">${t.status==='success'?'查看':'详情'}</button>
       ${t.status==='failed'||t.status==='cancelled'
-        ? `<button class="ghost" onclick="retryTask('${t.task_id}')">重试</button>` : ''}
-    </td></tr>`).join('') || '<tr><td colspan="5" class="muted">暂无任务</td></tr>';
+        ? `<button class="link" onclick="retryTask('${t.task_id}')">重试</button>` : ''}
+    </td></tr>`).join('') || '<tr><td colspan="5" class="muted" style="padding:22px 10px">暂无任务</td></tr>';
 }
 
 async function reviewTask(id, approved){
   try { await api(`/api/tasks/${id}/review`, {method:'POST', body: JSON.stringify({approved})});
-    toast(approved ? '已确认可用' : '已标记为不合格'); showTask(id); }
-  catch(e){ toast('操作失败: ' + e.message, 6000); }
+    toast(approved ? '已确认可用' : '已标记不合格'); showTask(id); }
+  catch(e){ toast('操作失败：' + e.message, 6000); }
 }
 async function retryTask(id){
   try { await api(`/api/tasks/${id}/retry`, {method:'POST', body:'{}'}); toast('已重新排队'); loadTasks(); }
-  catch(e){ toast('重试失败: ' + e.message, 6000); }
+  catch(e){ toast('重试失败：' + e.message, 6000); }
 }
 
 async function showTask(id){
   try {
     const t = await api('/api/tasks/' + id);
-    const reviewState = t.qa ? (t.qa.needs_human_review ? '待确认' : '已确认可用') : '';
+    const ver = t.metadata && t.metadata.version ? t.metadata.version : 1;
+    const reviewState = t.qa ? (t.qa.needs_human_review ? '待确认' : '已确认') : '';
     const reviewBtns = (t.status==='success' && t.qa) ? `
-      <button class="ghost" onclick="reviewTask('${t.task_id}',true)">✓ 确认可用</button>
-      <button class="ghost" onclick="reviewTask('${t.task_id}',false)">✗ 不合格</button>` : '';
-    const qa = t.qa ? `<h3>自动检查（${t.qa.passed?'通过':'发现问题'}，${reviewState}）${reviewBtns}</h3>
+      <button class="quiet" onclick="reviewTask('${t.task_id}',true)">确认可用</button>
+      <button class="quiet" onclick="reviewTask('${t.task_id}',false)">不合格</button>` : '';
+    const qa = t.qa ? `<h3>自动检查 · ${t.qa.passed?'通过':'发现问题'}${reviewState?' · '+reviewState:''}</h3>
+      <div class="flex">${reviewBtns}</div>
       ${t.qa.issues.length?`<pre>${esc(JSON.stringify(t.qa.issues, null, 2))}</pre>`:''}` : '';
     const img = t.status==='success' ? `<img class="preview" src="/api/tasks/${id}/image">` : '';
-    const ver = t.metadata && t.metadata.version ? t.metadata.version : 1;
     const correctForm = t.status==='success' ? `
-      <h3>带修正意见重生成（将创建 v${ver+1}，局部编辑而非重掷）</h3>
-      <p class="muted" style="font-size:12px;margin:2px 0 6px">写法要点：只点名要修的甲位；给全图计数锁（如「哥特蛋白石全图恰好 2 个」）；写明「其余九指完全不动」。可附一张该甲位的放大参考图。</p>
+      <h3>提交修正 · 将创建 v${ver+1}（锁定本版为底图的局部编辑）</h3>
+      <p class="muted" style="font-size:12px; margin:0 0 8px">写法：只点名要修的甲位；给全图计数锁（如「哥特蛋白石全图恰好 2 个」）；结尾写明其余甲位完全不动。可附该甲位放大参考图。</p>
       <textarea id="correctionText" placeholder="只交换右手第 1、3 槽的图案；太阳纹全图恰好一个；其余九个甲片完全不动。"></textarea>
       <div class="flex" style="margin-top:8px">
         <input id="correctionFile" type="file" accept="image/png,image/jpeg,image/webp" style="width:auto">
-        <button onclick="correctTask('${t.task_id}')">提交修正（v${ver+1}）</button>
+        <button onclick="correctTask('${t.task_id}')">提交修正</button>
       </div>` : '';
     $('#detailBox').innerHTML = `
-      <div class="flex"><h2 style="margin:0">${esc(t.sku)} · ${esc(TYPE_LABEL[t.output_type]||t.output_type)} · v${ver}</h2>
-        <span class="pill ${esc(t.status)}">${esc(t.status)}</span>
-        ${t.metadata && t.metadata.correction_of ? `<span class="muted" style="font-size:12px">修正自 ${esc(t.metadata.correction_of)}</span>` : ''}</div>
-      ${t.error_message?`<p style="color:var(--bad)">${esc(t.error_code)}: ${esc(t.error_message)}</p>`:''}
+      <div class="flex spread">
+        <h2>${esc(t.sku)} · ${esc(TYPE_LABEL[t.output_type]||t.output_type)} · v${ver}</h2>
+        <span class="st ${esc(t.status)}">${esc(ST_LABEL[t.status]||t.status)}</span>
+      </div>
+      ${t.metadata && t.metadata.correction_of ? `<p class="mono muted" style="font-size:11.5px; margin:4px 0 0">修正自 ${esc(t.metadata.correction_of)}</p>` : ''}
+      ${t.error_message?`<p style="color:var(--err)">${esc(t.error_code)}：${esc(t.error_message)}</p>`:''}
       ${img}
       ${qa}
       ${correctForm}
-      <p class="muted" style="font-size:12px">任务 ${esc(t.task_id)} · 模型 ${esc(t.model)} · prompt 版本 ${esc(t.prompt_version)}</p>`;
+      <p class="mono muted" style="font-size:11px; margin-top:20px">${esc(t.task_id)} · ${esc(t.model)} · ${esc(t.prompt_version)}</p>`;
     $('#detail').style.display = 'flex';
   } catch(e){ toast(e.message, 5000); }
 }
@@ -364,24 +442,24 @@ async function correctTask(id){
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || body.detail || ('HTTP '+res.status));
     toast(`修正版 v${body.version} 已排队`); $('#detail').style.display='none'; loadTasks();
-  } catch(e){ toast('提交失败: ' + e.message, 8000); }
+  } catch(e){ toast('提交失败：' + e.message, 8000); }
 }
 
 async function loadStats(){
   const s = await api('/api/stats');
   const t = s.tasks;
   $('#statCards').innerHTML = [
-    ['排队/生成中', t.pending + t.running + t.retrying],
+    ['进行中', t.pending + t.running + t.retrying],
     ['已完成', t.success], ['失败', t.failed],
     ['成功率', t.success_rate==null?'—':(t.success_rate*100).toFixed(0)+'%'],
-  ].map(([k,v])=>`<div class="card"><b>${v}</b><span>${k}</span></div>`).join('');
+  ].map(([k,v])=>`<div><b>${v}</b><span>${k}</span></div>`).join('');
 }
 
 async function doExport(){
   try {
     const out = await api('/api/export', {method:'POST', body: JSON.stringify({})});
-    toast(`素材包已导出: ${out.item_count} 个款式 → ${out.export_dir}`, 8000);
-  } catch(e){ toast('导出失败: ' + e.message, 6000); }
+    toast(`已导出 ${out.item_count} 个款式 → ${out.export_dir}`, 8000);
+  } catch(e){ toast('导出失败：' + e.message, 6000); }
 }
 
 function refreshAll(){ loadStyles(); loadTasks(); loadStats(); }
