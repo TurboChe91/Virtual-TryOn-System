@@ -20,7 +20,8 @@ from pathlib import Path
 from .config import Config
 from .db import Database
 from .logging_setup import task_logger
-from .models import OUTPUT_GRID, OUTPUT_WEARING
+from .models import OUTPUT_GRID, OUTPUT_HERO, OUTPUT_WEARING
+from .profiles import ProviderResolver
 from .prompts import strip_reference_block
 from .providers import GenerationRequest, ImageProvider, ProviderError
 from .qa import run_qa, store_qa_result
@@ -37,6 +38,7 @@ class Worker:
         self.db = db
         self.service = service
         self.provider = provider
+        self.resolver = ProviderResolver(config, db, provider)
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
 
@@ -104,6 +106,7 @@ class Worker:
     # ---------------- execution ----------------
 
     def _execute(self, task: dict) -> None:
+        provider, active_profile = self.resolver.resolve()
         log = task_logger(
             __name__,
             task_id=task["task_id"],
@@ -111,20 +114,26 @@ class Worker:
             style_id=task["style_id"],
             sku=task["sku"],
             output_type=task["output_type"],
-            provider=self.provider.name,
+            provider=provider.name,
             model=task["model"],
         )
         references = self._resolve_references(task, log)
         prompt = task["prompt"]
-        expected_reference = task["metadata"].get("use_reference") or task["metadata"].get(
-            "use_style_reference"
+        expected_reference = (
+            task["metadata"].get("use_reference")
+            or task["metadata"].get("use_style_reference")
+            or task["metadata"].get("use_hero_reference")
         )
         if expected_reference and not references:
             # Text-only fallback: the stored prompt must not claim an Image 1 exists.
             prompt = strip_reference_block(prompt)
             log.info("reference unavailable; stripped reference block from prompt",
                      ctx={"stage": "reference"})
-        size = self.config.grid_size if task["output_type"] == OUTPUT_GRID else self.config.wearing_size
+        size = self._size_for(task["output_type"])
+        extra: dict[str, str] = {}
+        if task["output_type"] == OUTPUT_HERO and task["model"].startswith("gpt-image"):
+            # Listing heroes are final assets; draft tiers are chosen per profile model.
+            extra = {"quality": "high", "output_format": "png"}
         request = GenerationRequest(
             prompt=prompt,
             negative_prompt=task["negative_prompt"],
@@ -132,18 +141,19 @@ class Worker:
             model=task["model"],
             task_id=task["task_id"],
             reference_images=references,
+            extra=extra,
         )
         fingerprint = hashlib.sha256(
             f"{prompt}|{size}|{task['model']}|{[str(r) for r in references]}".encode()
         ).hexdigest()[:16]
         attempt_no = self.service.start_attempt(
-            task["task_id"], provider=self.provider.name, model=task["model"], fingerprint=fingerprint
+            task["task_id"], provider=provider.name, model=task["model"], fingerprint=fingerprint
         )
         log.info("attempt started", ctx={"stage": "generate", "attempt": attempt_no})
 
         started = time.monotonic()
         try:
-            result = self.provider.generate(request)
+            result = provider.generate(request)
         except ProviderError as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             self.service.finish_attempt(
@@ -197,6 +207,7 @@ class Worker:
                 "reference_used": result.reference_used,
                 "response_meta": result.response_meta,
                 "image_sha256": hashlib.sha256(result.image_bytes).hexdigest(),
+                "api_profile": active_profile["name"] if active_profile else None,
             },
         )
         log.info(
@@ -227,7 +238,16 @@ class Worker:
             log.warning("qa run crashed; result not recorded", ctx={"stage": "qa"})
             logger.exception("qa failure detail")
 
+    def _size_for(self, output_type: str) -> tuple[int, int]:
+        if output_type == OUTPUT_GRID:
+            return self.config.grid_size
+        if output_type == OUTPUT_HERO:
+            return self.config.hero_size
+        return self.config.wearing_size
+
     def _resolve_references(self, task: dict, log) -> list[Path]:
+        if task["output_type"] == OUTPUT_HERO:
+            return self._resolve_hero_references(task, log)
         if task["output_type"] == OUTPUT_GRID:
             if not task["metadata"].get("use_style_reference"):
                 return []
@@ -250,6 +270,31 @@ class Worker:
                         ctx={"stage": "reference"})
             return []
         return [grid_path]
+
+    def _resolve_hero_references(self, task: dict, log) -> list[Path]:
+        """Image 1 = uploaded plan (or the latest grid), Image 2 = photo reference."""
+        if not task["metadata"].get("use_hero_reference"):
+            return []
+        style = self.service.get_style(task["style_id"])
+        plan: Path | None = None
+        uploaded_plan = Path(style.get("plan_image_path") or "")
+        if uploaded_plan.is_file():
+            plan = uploaded_plan
+        else:
+            grid_task = self.service.latest_successful_grid(task["style_id"])
+            if grid_task and grid_task.get("output_path"):
+                grid_path = Path(grid_task["output_path"])
+                if grid_path.is_file():
+                    plan = grid_path
+        if plan is None:
+            log.info("no plan image or grid available; generating hero text-only",
+                     ctx={"stage": "reference"})
+            return []
+        references = [plan]
+        photo_ref = Path(style.get("reference_image_path") or "")
+        if photo_ref.is_file():
+            references.append(photo_ref)
+        return references
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

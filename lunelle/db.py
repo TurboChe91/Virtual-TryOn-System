@@ -82,19 +82,37 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     for number, name, sql in _migration_files():
         if number in applied:
             continue
+        # Table rebuilds (CHECK/column changes) need the SQLite documented
+        # procedure: disable FK enforcement OUTSIDE the transaction, rebuild,
+        # then prove integrity with foreign_key_check before committing.
+        # (defer_foreign_keys cannot survive a parent-table DROP+recreate.)
+        fk_off = "lunelle:foreign_keys=off" in sql
         try:
-            with transaction(conn):
-                raced = conn.execute(
-                    "SELECT 1 FROM schema_migrations WHERE number = ?", (number,)
-                ).fetchone()
-                if raced is not None:  # another process applied it first
-                    continue
-                for statement in _split_statements(sql):
-                    conn.execute(statement)
-                conn.execute(
-                    "INSERT INTO schema_migrations (number, name, applied_at) VALUES (?, ?, ?)",
-                    (number, name, utcnow()),
-                )
+            if fk_off:
+                conn.execute("PRAGMA foreign_keys=OFF")
+            try:
+                with transaction(conn):
+                    raced = conn.execute(
+                        "SELECT 1 FROM schema_migrations WHERE number = ?", (number,)
+                    ).fetchone()
+                    if raced is not None:  # another process applied it first
+                        continue
+                    for statement in _split_statements(sql):
+                        conn.execute(statement)
+                    if fk_off:
+                        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+                        if violations:
+                            sample = [tuple(v) for v in violations[:5]]
+                            raise sqlite3.IntegrityError(
+                                f"foreign_key_check found {len(violations)} violation(s): {sample}"
+                            )
+                    conn.execute(
+                        "INSERT INTO schema_migrations (number, name, applied_at) VALUES (?, ?, ?)",
+                        (number, name, utcnow()),
+                    )
+            finally:
+                if fk_off:
+                    conn.execute("PRAGMA foreign_keys=ON")
         except sqlite3.Error as exc:
             raise RuntimeError(f"Migration {name} failed: {exc}") from exc
         done.append(name)

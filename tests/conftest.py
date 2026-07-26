@@ -33,6 +33,7 @@ def make_config(tmp_path: Path, **overrides) -> Config:
         image_provider="mock",
         grid_size=(512, 512),
         wearing_size=(512, 512),
+        hero_size=(768, 512),
         reference_mode="auto",
         text_api_base_url="",
         text_api_key="",

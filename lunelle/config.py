@@ -83,6 +83,7 @@ class Config:
     image_provider: str
     grid_size: tuple[int, int]
     wearing_size: tuple[int, int]
+    hero_size: tuple[int, int]
     reference_mode: str
 
     text_api_base_url: str
@@ -223,6 +224,7 @@ def load_config(dotenv_path: str | os.PathLike | None = None) -> Config:
         image_provider=provider,
         grid_size=_env_size("LUNELLE_GRID_IMAGE_SIZE", "2048x2048"),
         wearing_size=_env_size("LUNELLE_WEARING_IMAGE_SIZE", "2048x2048"),
+        hero_size=_env_size("LUNELLE_HERO_IMAGE_SIZE", "1536x1024"),
         reference_mode=reference_mode,
         text_api_base_url=(_env("LUNELLE_TEXT_API_BASE_URL").rstrip("/") or image_base),
         text_api_key=(_env("LUNELLE_TEXT_API_KEY") or image_key),

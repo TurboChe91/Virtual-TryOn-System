@@ -8,7 +8,13 @@ import uuid
 
 OUTPUT_GRID = "grid"
 OUTPUT_WEARING = "wearing"
-OUTPUT_TYPES = (OUTPUT_GRID, OUTPUT_WEARING)
+OUTPUT_HERO = "hero"
+# Reserved by migration 0002 for the upcoming matrix/repair pipelines.
+OUTPUT_MATRIX_CELL = "matrix_cell"
+OUTPUT_REPAIR = "repair"
+OUTPUT_TYPES = (OUTPUT_GRID, OUTPUT_WEARING, OUTPUT_HERO, OUTPUT_MATRIX_CELL, OUTPUT_REPAIR)
+# Types that /api/styles/{id}/generate accepts today.
+GENERATABLE_OUTPUT_TYPES = (OUTPUT_GRID, OUTPUT_WEARING, OUTPUT_HERO)
 
 # ---- Task statuses ---------------------------------------------------------
 

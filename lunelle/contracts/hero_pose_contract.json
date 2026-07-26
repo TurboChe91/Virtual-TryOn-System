@@ -1,0 +1,41 @@
+{
+  "contract": "imagegen_direct_hero_pose_v3",
+  "pose_id": "hero_symmetric_curled_reference",
+  "scope": "single current Shopify hero pose only",
+  "mapping_source": "shopify-theme/assets/tryon-ai/annotations/natural/light/p4-thumb-visible-labeled.png",
+  "photography_reference_example": "input/punk-tube-2/reference.png",
+  "visible_nails": [
+    "nail-01",
+    "nail-02",
+    "nail-03",
+    "nail-04",
+    "nail-05",
+    "nail-06",
+    "nail-07",
+    "nail-08",
+    "nail-09",
+    "nail-10"
+  ],
+  "screen_slots": {
+    "left_upper_fingers_left_to_right": ["nail-02", "nail-03", "nail-04", "nail-05"],
+    "left_thumb": {"nail_id": "nail-01", "position": "lower-left outer thumb"},
+    "right_upper_fingers_left_to_right": ["nail-10", "nail-09", "nail-08", "nail-07"],
+    "right_thumb": {"nail_id": "nail-06", "position": "lower-right outer thumb"}
+  },
+  "view_plan_rows": {
+    "left_hand_screen_order": ["nail-01", "nail-02", "nail-03", "nail-04", "nail-05"],
+    "right_hand_screen_order": ["nail-10", "nail-09", "nail-08", "nail-07", "nail-06"]
+  },
+  "pose": "Two complete hands displayed symmetrically with palms toward the camera and fingers gently curled so all ten nail faces are readable. The two pinkies face toward the center gap. Both thumbs sit lower and outside. Both wrists remain fully visible.",
+  "background": "Matte cream draped-fabric curtain with soft vertical folds and no props or clutter.",
+  "lighting": "Soft diffused professional studio light, natural light-skin texture and color, gentle contact shadows, no hard flash and no plastic over-smoothing.",
+  "framing": "1536x1024 landscape Shopify listing hero. Match the photography reference's hand scale, wrist visibility, center gap and generous cream-fabric margin; no tight crop.",
+  "nail_length_shape": "For every nail independently, length, width, taper, free-edge shape, and overall silhouette must strictly match that nail in Image 1 view-plan and its original 2x5 plan source. Ten nails may intentionally differ (for example short square, medium coffin, or long almond); preserve those per-nail differences exactly.",
+  "authority": {
+    "image_1": "nail identity and geometry: colors, textures, motifs, counts, 3D decorations, per-nail length, and per-nail silhouette",
+    "image_2": "photography only: pose, hand geometry, background, crop, lighting, and skin",
+    "image_3_optional": "previous candidate only for v2+ preservation and targeted correction",
+    "forbidden_transfer": "Never copy Image 2 nail art, French tips, bows, pearls, rhinestone arches, colors, long-coffin length, or nail silhouette into the style design.",
+    "forbidden_shape_homogenization": "Never homogenize or unify all ten nails into the photography reference's long coffin shape or any single shared length/shape. Reproduce the ten distinct Image 1 silhouettes per nail."
+  }
+}

@@ -15,6 +15,9 @@ class GenerationRequest:
     model: str
     task_id: str
     reference_images: list[Path] = field(default_factory=list)
+    # Extra wire parameters (e.g. quality/output_format for gpt-image models);
+    # merged verbatim into the request body by the adapter.
+    extra: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

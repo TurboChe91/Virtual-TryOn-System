@@ -45,3 +45,22 @@
 1. 参考图→StyleSpec（用 doubao-seed-2.0 视觉模型，产出仍过 StyleSpec 校验）
 2. 佩戴图多版本挑选（一次 n>1 出图 + 管理页勾选终稿）
 3. Shopify Admin API 直传（当前为 CSV+文件包人工上传）
+
+## 2026-07-26 增量：API 通道页 / 素材上传 / Hero 生成
+
+- **API 通道 profiles**（migration 0002，`lunelle/profiles.py`）：多通道配置存 SQLite
+  （base_url/key/model/reference_mode/supports_mask/单价），Web 页可增删改查、激活、
+  连通性测试（GET /models，零生图费用）；未激活任何通道时回退 .env。Worker 按任务
+  解析 provider，切通道无需重启；密钥仅存库、接口只回指纹+末四位。
+- **款式素材**：上传接口扩展 `?kind=plan|reference`（plan = 2×5 款式图，hero 的
+  Image 1）；styles 新列 `plan_image_path` / `identity_text`（十指身份文本，
+  PUT /api/styles/{id}/identity）。
+- **Hero 输出类型**：`output_type=hero`（tasks CHECK 已放宽，另预留 matrix_cell/
+  repair）。契约锁定 prompt 移植自前代 run_imagegen_direct.py，contract JSON 在
+  `lunelle/contracts/hero_pose_contract.json`，内容哈希并入 prompt_version
+  （hv-1+<sha8>）。无 plan 上传时 hero 自动 wait_for 同批 grid 作为 Image 1；
+  Image 2 = 已上传参考图。尺寸独立配置 LUNELLE_HERO_IMAGE_SIZE（默认 1536x1024）。
+  gpt-image* 模型的 hero 请求自动附 quality=high + output_format=png。
+- 验证：142 tests passed（新增 profiles 单测 + hero 集成测试）、ruff/mypy 干净、
+  TestClient 冒烟走通配置页→上传→hero 入队全链路。
+- 未做（原样保留在 backlog）：matrix 16 格编排、mask 修补任务、Shopify Admin 直传。

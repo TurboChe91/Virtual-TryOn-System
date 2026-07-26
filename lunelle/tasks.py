@@ -19,9 +19,10 @@ from .models import (
     CANCELLED,
     CLAIMABLE_STATUSES,
     FAILED,
+    GENERATABLE_OUTPUT_TYPES,
     MANUAL_RETRY_STATUSES,
     OUTPUT_GRID,
-    OUTPUT_TYPES,
+    OUTPUT_HERO,
     OUTPUT_WEARING,
     PENDING,
     RETRYING,
@@ -33,7 +34,12 @@ from .models import (
     new_style_id,
     new_task_id,
 )
-from .prompts import PromptBundle, build_prompt_bundle, prompt_for_output_type
+from .prompts import (
+    PromptBundle,
+    build_prompt_bundle,
+    prompt_for_output_type,
+    prompt_version_for,
+)
 from .schemas import StyleSpec
 
 logger = logging.getLogger(__name__)
@@ -129,11 +135,21 @@ class TaskService:
         return {r["sku"] for r in self.db.conn().execute("SELECT sku FROM styles")}
 
     def set_reference_image(self, style_id: str, path: Path) -> None:
+        self._set_style_column(style_id, "reference_image_path", str(path))
+
+    def set_plan_image(self, style_id: str, path: Path) -> None:
+        self._set_style_column(style_id, "plan_image_path", str(path))
+
+    def set_identity_text(self, style_id: str, text: str) -> None:
+        self._set_style_column(style_id, "identity_text", text.strip() or None)
+
+    def _set_style_column(self, style_id: str, column: str, value) -> None:
+        assert column in ("reference_image_path", "plan_image_path", "identity_text")
         conn = self.db.conn()
         with transaction(conn):
-            cur = conn.execute(
-                "UPDATE styles SET reference_image_path = ?, updated_at = ? WHERE style_id = ?",
-                (str(path), utcnow(), style_id),
+            cur = conn.execute(  # noqa: S608 - column restricted by the assert above
+                f"UPDATE styles SET {column} = ?, updated_at = ? WHERE style_id = ?",  # noqa: S608
+                (value, utcnow(), style_id),
             )
             if cur.rowcount == 0:
                 raise NotFoundError(f"style {style_id} not found")
@@ -154,7 +170,22 @@ class TaskService:
             self.config.wearing_size,
             with_reference=use_refs,
             with_grid_reference=use_refs and has_style_ref,
+            identity_text=style.get("identity_text"),
+            with_hero_reference=use_refs,
         )
+
+    def _generation_channel(self) -> tuple[str, str, float, str | None]:
+        """(provider, model, price, profile_name) — active DB profile wins over env."""
+        from .profiles import ProfileService
+
+        row = ProfileService(self.db).active_row()
+        if row is None:
+            model = self.config.image_model
+            return self.config.image_provider, model, self.config.price_for(model), None
+        price = row["price_per_image_usd"]
+        if price is None:
+            price = self.config.price_for(row["model"])
+        return "openai-compat", row["model"], float(price), row["name"]
 
     @staticmethod
     def idempotency_key(style_id: str, output_type: str, prompt_version: str, prompt: str, nonce: str) -> str:
@@ -168,8 +199,9 @@ class TaskService:
         style = self.get_style(style_id)
         bundle = self.prompt_bundle_for(style)
         for output_type in output_types:
-            if output_type not in OUTPUT_TYPES:
+            if output_type not in GENERATABLE_OUTPUT_TYPES:
                 raise ValueError(f"invalid output type {output_type!r}")
+        provider_name, model, price, profile_name = self._generation_channel()
 
         conn = self.db.conn()
         batch_id = new_batch_id()
@@ -178,6 +210,7 @@ class TaskService:
         reused: list[dict] = []
         skipped: list[dict] = []
 
+        order = {OUTPUT_GRID: 0, OUTPUT_HERO: 1, OUTPUT_WEARING: 2}
         with transaction(conn):
             conn.execute(
                 "INSERT INTO batches (batch_id, note, created_at) VALUES (?,?,?)",
@@ -185,11 +218,12 @@ class TaskService:
             )
             grid_task_id_this_round: str | None = None
 
-            for output_type in sorted(output_types, key=lambda t: 0 if t == OUTPUT_GRID else 1):
+            for output_type in sorted(output_types, key=lambda t: order.get(t, 3)):
                 prompt = prompt_for_output_type(bundle, output_type)
+                version = prompt_version_for(output_type)
                 nonce = batch_id if force else ""
                 key = self.idempotency_key(
-                    style_id, output_type, bundle.prompt_version, prompt, nonce
+                    style_id, output_type, version, prompt, nonce
                 )
                 existing = conn.execute(
                     "SELECT * FROM tasks WHERE idempotency_key = ?", (key,)
@@ -220,9 +254,17 @@ class TaskService:
                 task_id = new_task_id()
                 wait_for = None
                 metadata: dict = {"note": note} if note else {}
+                if profile_name:
+                    metadata["api_profile"] = profile_name
                 if output_type == OUTPUT_WEARING and self.config.reference_mode != "off":
                     metadata["use_reference"] = True
                     if grid_task_id_this_round:
+                        wait_for = grid_task_id_this_round
+                if output_type == OUTPUT_HERO and self.config.reference_mode != "off":
+                    metadata["use_hero_reference"] = True
+                    # The plan upload is Image 1 when present; otherwise the hero
+                    # rides on the latest grid, so gate it on a grid queued now.
+                    if not style.get("plan_image_path") and grid_task_id_this_round:
                         wait_for = grid_task_id_this_round
                 if (
                     output_type == OUTPUT_GRID
@@ -245,13 +287,13 @@ class TaskService:
                         output_type,
                         prompt,
                         bundle.negative_prompt,
-                        bundle.prompt_version,
-                        self.config.image_provider,
-                        self.config.image_model,
+                        version,
+                        provider_name,
+                        model,
                         PENDING,
                         0,
                         self.config.max_retries,
-                        self.config.price_for(self.config.image_model),
+                        price,
                         key,
                         wait_for,
                         now,

@@ -133,7 +133,7 @@ class StyleCreateRequest(BaseModel):
 class GenerateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    output_types: list[Literal["grid", "wearing"]] = Field(default=["grid", "wearing"])
+    output_types: list[Literal["grid", "wearing", "hero"]] = Field(default=["grid", "wearing"])
     force: bool = Field(
         default=False,
         description="create a new generation version even if one already exists/succeeded",
@@ -157,6 +157,38 @@ class ReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     approved: bool = Field(..., description="true clears needs_human_review on the latest QA result")
     note: str = Field(default="", max_length=300)
+
+
+class IdentityRequest(BaseModel):
+    """Per-nail identity text (the predecessor identity.txt format) for hero prompts."""
+
+    model_config = ConfigDict(extra="forbid")
+    identity_text: str = Field(default="", max_length=8000)
+
+
+class ProfileCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(..., min_length=1, max_length=60)
+    base_url: str = Field(..., min_length=9, max_length=300)
+    api_key: str = Field(..., min_length=8, max_length=300)
+    model: str = Field(..., min_length=1, max_length=120)
+    kind: Literal["image", "llm"] = "image"
+    reference_mode: Literal["auto", "seedream", "openai-edits", "off"] = "auto"
+    supports_mask: bool = False
+    price_per_image_usd: float | None = Field(default=None, ge=0, le=10)
+
+
+class ProfileUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+    base_url: str | None = Field(default=None, min_length=9, max_length=300)
+    api_key: str | None = Field(default=None, min_length=8, max_length=300)
+    model: str | None = Field(default=None, min_length=1, max_length=120)
+    reference_mode: Literal["auto", "seedream", "openai-edits", "off"] | None = None
+    supports_mask: bool | None = None
+    price_per_image_usd: float | None = Field(default=None, ge=0, le=10)
 
 
 class ExportRequest(BaseModel):

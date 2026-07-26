@@ -14,8 +14,8 @@
            border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
   header h1 { font-size:17px; margin:0; letter-spacing:.5px; }
   header .sub { color:var(--sub); font-size:12px; }
-  header input { margin-left:auto; width:210px; }
-  main { max-width:1200px; margin:0 auto; padding:20px 24px 60px; }
+  header a.settings { margin-left:auto; color:var(--accent); text-decoration:none; font-size:13px; }
+  main { max-width:1100px; margin:0 auto; padding:20px 24px 60px; }
   section { background:var(--card); border:1px solid var(--line); border-radius:10px;
             padding:18px 20px; margin-bottom:18px; }
   h2 { font-size:15px; margin:0 0 12px; }
@@ -28,6 +28,13 @@
            border-radius:6px; cursor:pointer; font:inherit; }
   button.ghost { background:#fff; color:var(--accent); }
   button:disabled { opacity:.5; cursor:default; }
+  .tabs { display:flex; gap:0; margin-bottom:14px; border-bottom:1px solid var(--line); }
+  .tabs button { border:none; background:none; color:var(--sub); border-radius:0;
+                 padding:8px 16px; border-bottom:2px solid transparent; }
+  .tabs button.on { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+  .dropzone { border:2px dashed var(--line); border-radius:10px; padding:26px; text-align:center;
+              color:var(--sub); cursor:pointer; }
+  .dropzone:hover { border-color:var(--accent); color:var(--accent); }
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
   th { color:var(--sub); font-weight:500; font-size:12px; }
@@ -35,10 +42,19 @@
   .pill.success{background:var(--ok)} .pill.failed{background:var(--bad)}
   .pill.running{background:#3d6ea5} .pill.pending{background:#9a938a}
   .pill.retrying{background:var(--warn)} .pill.cancelled{background:#6b6156}
-  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-bottom:12px; }
+  .chip { display:inline-block; font-size:11px; color:var(--sub); border:1px solid var(--line);
+          border-radius:12px; padding:0 8px; margin-right:4px; }
+  .chip.yes { color:var(--ok); border-color:var(--ok); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; margin-bottom:6px; }
   .card { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
   .card b { display:block; font-size:20px; }
   .card span { color:var(--sub); font-size:12px; }
+  .styleGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:12px; }
+  .styleCard { border:1px solid var(--line); border-radius:10px; padding:14px 16px; background:var(--bg); }
+  .styleCard h3 { margin:0 0 2px; font-size:14px; }
+  .styleCard .sku { color:var(--sub); font-size:12px; margin-bottom:8px; }
+  .styleCard .actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+  .styleCard .actions button { padding:4px 10px; font-size:12px; }
   #detail { position:fixed; inset:0; background:rgba(40,33,26,.45); display:none;
             align-items:flex-start; justify-content:center; padding:40px 16px; overflow:auto; z-index:10; }
   #detail .box { background:#fff; border-radius:12px; max-width:860px; width:100%; padding:22px 26px; }
@@ -54,67 +70,67 @@
 <body>
 <header>
   <h1>Lunelle Studio</h1>
-  <span class="sub">AI 穿戴甲视觉资产生产</span>
-  <input id="adminToken" type="password" placeholder="X-Admin-Token（未设置可留空）">
+  <span class="sub">穿戴甲视觉资产工作台</span>
+  <a class="settings" href="/settings">⚙ 设置</a>
 </header>
 <main>
   <section>
-    <h2>新建款式</h2>
-    <div class="row">
-      <div><label>款式名称</label><input id="f_name" placeholder="Pearl French"></div>
-      <div><label>SKU（留空自动生成）</label><input id="f_sku" placeholder="nail-pearl-french"></div>
-      <div><label>甲型</label><select id="f_shape"><option value="">自动识别</option>
-        <option>almond</option><option>coffin</option><option>square</option>
-        <option>tapered-square</option><option>squoval</option><option>oval</option>
-        <option>round</option><option>stiletto</option></select></div>
-      <div><label>长度</label><select id="f_length"><option value="">自动识别</option>
-        <option>short</option><option>medium</option><option>long</option><option>extra-long</option></select></div>
-      <div><label>肤色（佩戴图）</label><select id="f_skin"><option value="">light</option>
-        <option>light</option><option>medium</option><option>tan</option><option>deep</option></select></div>
+    <h2>创建新款式</h2>
+    <div class="tabs">
+      <button id="tabDesc" class="on" onclick="switchTab('desc')">✍ 从描述创建</button>
+      <button id="tabImage" onclick="switchTab('image')">🖼 传图自动识别</button>
     </div>
-    <label>自然语言描述</label>
-    <textarea id="f_desc" placeholder="milky white almond nails with pearl accents, thin gold lines and a french tip, glossy finish"></textarea>
-    <div class="row">
-      <div><label>主色（逗号分隔）</label><input id="f_colors" placeholder="milky white, soft pink"></div>
-      <div><label>元素（逗号分隔）</label><input id="f_elements" placeholder="pearl, gold line, french tip"></div>
-      <div><label>质感（逗号分隔）</label><input id="f_texture" placeholder="glossy, translucent"></div>
-      <div><label>避免元素（逗号分隔）</label><input id="f_avoid" placeholder="cartoon style, oversized decoration"></div>
+    <div id="paneDesc">
+      <label>用一句话描述你想要的款式（中英文都可以）</label>
+      <textarea id="f_desc" placeholder="奶白色杏仁形指甲，珍珠点缀，细金线和法式甲尖，亮面"></textarea>
+      <div class="row">
+        <div><label>款式名称（可选）</label><input id="f_name" placeholder="Pearl French"></div>
+        <div><label>甲型</label><select id="f_shape"><option value="">自动识别</option>
+          <option>almond</option><option>coffin</option><option>square</option>
+          <option>tapered-square</option><option>squoval</option><option>oval</option>
+          <option>round</option><option>stiletto</option></select></div>
+        <div><label>长度</label><select id="f_length"><option value="">自动识别</option>
+          <option>short</option><option>medium</option><option>long</option><option>extra-long</option></select></div>
+        <div><label>佩戴图肤色</label><select id="f_skin"><option value="">light</option>
+          <option>light</option><option>medium</option><option>tan</option><option>deep</option></select></div>
+      </div>
+      <div class="flex" style="margin-top:12px">
+        <button onclick="createStyle(false)">创建款式</button>
+        <button class="ghost" onclick="createStyle(true)">创建并立即出图</button>
+        <span class="muted" id="createMsg"></span>
+      </div>
     </div>
-    <div class="flex" style="margin-top:12px">
-      <button onclick="createStyle(false)">创建款式</button>
-      <button class="ghost" onclick="createStyle(true)">创建并生成两图</button>
-      <span class="muted" id="createMsg"></span>
+    <div id="paneImage" style="display:none">
+      <div class="dropzone" id="dropzone" onclick="$('#imgPick').click()">
+        点击选择设计图（成品照 / 款式图均可）<br>
+        <span style="font-size:12px">AI 会自动识别颜色、元素、甲型并生成款式描述，图片同时保存为该款式的参考图</span>
+      </div>
+      <input id="imgPick" type="file" accept="image/png,image/jpeg,image/webp" style="display:none">
+      <div class="flex" style="margin-top:10px">
+        <span class="muted" id="imgMsg"></span>
+      </div>
     </div>
   </section>
 
   <section>
-    <h2>统计</h2>
+    <h2>我的款式</h2>
+    <div class="styleGrid" id="styleGrid"></div>
+  </section>
+
+  <section>
+    <h2>生成进度</h2>
     <div class="cards" id="statCards"></div>
-    <div id="skuStats" class="muted"></div>
-  </section>
-
-  <section>
-    <h2>款式列表</h2>
-    <table id="stylesTable"><thead><tr>
-      <th>SKU</th><th>名称</th><th>甲型/长度</th><th>主色</th><th>创建时间</th><th></th>
-    </tr></thead><tbody></tbody></table>
-  </section>
-
-  <section>
-    <h2>任务</h2>
-    <div class="flex" style="margin-bottom:10px">
+    <div class="flex" style="margin:8px 0 10px">
       <select id="q_status" style="width:130px"><option value="">全部状态</option>
         <option>pending</option><option>running</option><option>success</option>
         <option>failed</option><option>retrying</option><option>cancelled</option></select>
       <select id="q_type" style="width:130px"><option value="">全部类型</option>
-        <option>grid</option><option>wearing</option></select>
-      <input id="q_sku" placeholder="按 SKU 筛选" style="width:180px">
+        <option>grid</option><option>wearing</option><option>hero</option></select>
       <button class="ghost" onclick="loadTasks()">刷新</button>
-      <button class="ghost" onclick="doExport()">导出 Shopify 素材</button>
+      <button class="ghost" onclick="doExport()">📦 导出上架素材包</button>
     </div>
     <table id="tasksTable"><thead><tr>
-      <th>任务</th><th>SKU</th><th>类型</th><th>状态</th><th>重试</th><th>模型</th>
-      <th>创建时间</th><th>错误</th><th></th>
+      <th>款式</th><th>类型</th><th>状态</th><th>创建时间</th><th></th>
     </tr></thead><tbody></tbody></table>
   </section>
 </main>
@@ -127,9 +143,8 @@
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const token = () => $('#adminToken').value.trim();
-$('#adminToken').value = localStorage.getItem('lunelle_token') || '';
-$('#adminToken').addEventListener('change', () => localStorage.setItem('lunelle_token', token()));
+const token = () => localStorage.getItem('lunelle_token') || '';
+const TYPE_LABEL = {grid:'商品图', wearing:'佩戴图', hero:'上架主图', matrix_cell:'试戴格', repair:'修补'};
 
 function toast(msg, ms=3500){ const t=$('#toast'); t.textContent=msg; t.style.display='block';
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none', ms); }
@@ -143,18 +158,28 @@ async function api(path, opts={}) {
   if (!res.ok) throw new Error((body && (body.error||body.detail)) || ('HTTP '+res.status));
   return body;
 }
+async function upload(path, file){
+  const fd = new FormData(); fd.append('file', file);
+  const headers = token() ? {'X-Admin-Token': token()} : {};
+  const res = await fetch(path, {method:'POST', body: fd, headers});
+  const body = await res.json().catch(()=>null);
+  if (!res.ok) throw new Error((body && (body.error||body.detail)) || ('HTTP '+res.status));
+  return body;
+}
 const csv = v => v.split(',').map(s=>s.trim()).filter(Boolean);
+
+function switchTab(which){
+  $('#tabDesc').classList.toggle('on', which==='desc');
+  $('#tabImage').classList.toggle('on', which==='image');
+  $('#paneDesc').style.display = which==='desc' ? '' : 'none';
+  $('#paneImage').style.display = which==='image' ? '' : 'none';
+}
 
 async function createStyle(alsoGenerate){
   $('#createMsg').textContent = '';
   const body = {
     name: $('#f_name').value.trim() || null,
-    sku: $('#f_sku').value.trim() || null,
     description: $('#f_desc').value.trim(),
-    base_colors: csv($('#f_colors').value),
-    elements: csv($('#f_elements').value),
-    texture: csv($('#f_texture').value),
-    avoid: csv($('#f_avoid').value),
     shape: $('#f_shape').value || null,
     length: $('#f_length').value || null,
     skin_tone: $('#f_skin').value || null,
@@ -166,93 +191,152 @@ async function createStyle(alsoGenerate){
     if (alsoGenerate) {
       const gen = await api(`/api/styles/${out.style.style_id}/generate`,
         {method:'POST', body: JSON.stringify({output_types:['grid','wearing']})});
-      msg += ' | 已创建 ' + gen.created.length + ' 个生成任务';
+      msg += ' | 已排队 ' + gen.created.length + ' 个出图任务';
     }
     $('#createMsg').textContent = msg;
     toast(msg); refreshAll();
   } catch(e){ toast('创建失败: ' + e.message, 6000); }
 }
 
-async function generateFor(styleId, force){
+$('#imgPick').addEventListener('change', async () => {
+  if (!$('#imgPick').files.length) return;
+  $('#imgMsg').textContent = 'AI 识别中，请稍候…';
+  try {
+    const out = await upload('/api/styles/from-image', $('#imgPick').files[0]);
+    $('#imgMsg').textContent = `已识别并创建: ${out.style.name}（${out.style.sku}）`;
+    toast('识别成功，款式已创建；可在卡片上继续「识别十甲身份」或直接出图', 6000);
+    refreshAll();
+  } catch(e){
+    $('#imgMsg').textContent = '';
+    toast('识别失败: ' + e.message, 8000);
+  }
+  $('#imgPick').value = '';
+});
+
+async function generateTypes(styleId, types){
   try {
     const gen = await api(`/api/styles/${styleId}/generate`,
-      {method:'POST', body: JSON.stringify({output_types:['grid','wearing'], force: !!force})});
-    toast(`批次 ${gen.batch_id}: 新建 ${gen.created.length}，复用 ${gen.reused.length}，跳过 ${gen.skipped.length}`);
+      {method:'POST', body: JSON.stringify({output_types: types})});
+    toast(`已排队 ${gen.created.length} 个任务` +
+      (gen.skipped.length ? `（${gen.skipped.length} 个已有成品被跳过）` : ''));
     loadTasks();
-  } catch(e){ toast('生成失败: ' + e.message, 6000); }
+  } catch(e){ toast('出图失败: ' + e.message, 6000); }
+}
+
+const filePicker = document.createElement('input');
+filePicker.type = 'file'; filePicker.accept = 'image/png,image/jpeg,image/webp';
+filePicker.style.display = 'none'; document.body.appendChild(filePicker);
+function pickUpload(styleId, kind){
+  filePicker.onchange = async () => {
+    if (!filePicker.files.length) return;
+    try {
+      const out = await upload(`/api/styles/${styleId}/reference-image?kind=${kind}`, filePicker.files[0]);
+      toast(`已上传${kind === 'plan' ? '款式图' : '参考图'}: ${out.stored}`);
+      loadStyles();
+    } catch(e){ toast('上传失败: ' + e.message, 6000); }
+    filePicker.value = '';
+  };
+  filePicker.click();
+}
+
+async function identifyStyle(styleId){
+  toast('AI 正在逐指识别十甲身份…', 20000);
+  try {
+    const out = await api(`/api/styles/${styleId}/identify`, {method:'POST', body:'{}'});
+    toast('十甲身份已生成并保存（来源: ' + out.source + '）', 6000);
+    loadStyles();
+  } catch(e){ toast('识别失败: ' + e.message, 8000); }
+}
+
+async function editIdentity(styleId){
+  let current = '';
+  try { const s = await api('/api/styles/' + styleId); current = s.style.identity_text || ''; } catch(e){}
+  $('#detailBox').innerHTML = `
+    <h2 style="margin-top:0">十甲身份</h2>
+    <p class="muted">逐指描述设计（nail-01..nail-10）；生成上架主图时以此为准。可点「AI 识别」自动生成后再修改。</p>
+    <textarea id="identityText" style="min-height:220px">${esc(current)}</textarea>
+    <div class="flex" style="margin-top:10px">
+      <button onclick="saveIdentity('${styleId}')">保存</button>
+      <button class="ghost" onclick="$('#detail').style.display='none'">取消</button>
+    </div>`;
+  $('#detail').style.display = 'flex';
+}
+async function saveIdentity(styleId){
+  try {
+    await api(`/api/styles/${styleId}/identity`,
+      {method:'PUT', body: JSON.stringify({identity_text: $('#identityText').value})});
+    toast('已保存'); $('#detail').style.display='none'; loadStyles();
+  } catch(e){ toast('保存失败: ' + e.message, 6000); }
 }
 
 async function loadStyles(){
   const out = await api('/api/styles');
-  $('#stylesTable tbody').innerHTML = out.styles.map(s => {
+  $('#styleGrid').innerHTML = out.styles.map(s => {
     const spec = s.spec || {};
-    return `<tr>
-      <td>${esc(s.sku)}</td><td>${esc(s.name)}</td>
-      <td>${esc(spec.shape)}/${esc(spec.length)}</td>
-      <td>${esc((spec.base_colors||[]).join(', '))}</td>
-      <td class="muted">${esc(s.created_at)}</td>
-      <td class="flex">
-        <button class="ghost" onclick="generateFor('${s.style_id}',false)">生成</button>
-        <button class="ghost" onclick="generateFor('${s.style_id}',true)">强制新版本</button>
-      </td></tr>`;
-  }).join('') || '<tr><td colspan="6" class="muted">暂无款式</td></tr>';
+    return `<div class="styleCard">
+      <h3>${esc(s.name)}</h3>
+      <div class="sku">${esc(s.sku)} · ${esc(spec.shape)} / ${esc(spec.length)}</div>
+      <div>
+        <span class="chip ${s.plan_image_path?'yes':''}">款式图${s.plan_image_path?' ✓':''}</span>
+        <span class="chip ${s.reference_image_path?'yes':''}">参考图${s.reference_image_path?' ✓':''}</span>
+        <span class="chip ${s.identity_text?'yes':''}">十甲身份${s.identity_text?' ✓':''}</span>
+      </div>
+      <div class="actions">
+        <button onclick="generateTypes('${s.style_id}',['grid','wearing'])">出商品图+佩戴图</button>
+        <button class="ghost" onclick="generateTypes('${s.style_id}',['hero'])">出上架主图</button>
+        <button class="ghost" onclick="identifyStyle('${s.style_id}')">AI 识别十甲身份</button>
+        <button class="ghost" onclick="pickUpload('${s.style_id}','plan')">传款式图</button>
+        <button class="ghost" onclick="pickUpload('${s.style_id}','reference')">传参考图</button>
+        <button class="ghost" onclick="editIdentity('${s.style_id}')">编辑身份</button>
+      </div></div>`;
+  }).join('') || '<p class="muted">还没有款式——用上面的两种方式创建第一个吧。</p>';
 }
 
 async function loadTasks(){
   const p = new URLSearchParams();
   if ($('#q_status').value) p.set('status', $('#q_status').value);
   if ($('#q_type').value) p.set('output_type', $('#q_type').value);
-  if ($('#q_sku').value.trim()) p.set('sku', $('#q_sku').value.trim());
   const out = await api('/api/tasks?' + p);
   $('#tasksTable tbody').innerHTML = out.tasks.map(t => `<tr>
-    <td><a href="#" onclick="showTask('${t.task_id}');return false">${esc(t.task_id)}</a></td>
-    <td>${esc(t.sku)}</td><td>${esc(t.output_type)}</td>
-    <td><span class="pill ${esc(t.status)}">${esc(t.status)}</span></td>
-    <td>${t.retry_count}/${t.max_retries}</td>
-    <td class="muted">${esc(t.model)}</td>
-    <td class="muted">${esc(t.created_at)}</td>
-    <td class="muted">${esc(t.error_code||'')}</td>
-    <td>${t.status==='failed'||t.status==='cancelled'
-        ? `<button class="ghost" onclick="retryTask('${t.task_id}')">重试</button>` : ''}</td>
-  </tr>`).join('') || '<tr><td colspan="9" class="muted">暂无任务</td></tr>';
+    <td>${esc(t.sku)}</td>
+    <td>${esc(TYPE_LABEL[t.output_type]||t.output_type)}</td>
+    <td><span class="pill ${esc(t.status)}">${esc(t.status)}</span>
+        ${t.error_code?`<span class="muted" style="font-size:11px"> ${esc(t.error_code)}</span>`:''}</td>
+    <td class="muted">${esc((t.created_at||'').replace('T',' ').replace('Z',''))}</td>
+    <td class="flex">
+      <button class="ghost" onclick="showTask('${t.task_id}')">${t.status==='success'?'查看成品':'详情'}</button>
+      ${t.status==='failed'||t.status==='cancelled'
+        ? `<button class="ghost" onclick="retryTask('${t.task_id}')">重试</button>` : ''}
+    </td></tr>`).join('') || '<tr><td colspan="5" class="muted">暂无任务</td></tr>';
 }
 
 async function reviewTask(id, approved){
   try { await api(`/api/tasks/${id}/review`, {method:'POST', body: JSON.stringify({approved})});
-    toast(approved ? '已标记复核通过' : '已标记复核不通过'); showTask(id); }
-  catch(e){ toast('复核失败: ' + e.message, 6000); }
+    toast(approved ? '已确认可用' : '已标记为不合格'); showTask(id); }
+  catch(e){ toast('操作失败: ' + e.message, 6000); }
 }
-
 async function retryTask(id){
-  try { await api(`/api/tasks/${id}/retry`, {method:'POST', body:'{}'}); toast('已重新入队'); loadTasks(); }
+  try { await api(`/api/tasks/${id}/retry`, {method:'POST', body:'{}'}); toast('已重新排队'); loadTasks(); }
   catch(e){ toast('重试失败: ' + e.message, 6000); }
 }
 
 async function showTask(id){
   try {
     const t = await api('/api/tasks/' + id);
-    const reviewState = t.qa ? (t.qa.needs_human_review ? '待人工复核' : '已复核通过') : '';
+    const reviewState = t.qa ? (t.qa.needs_human_review ? '待确认' : '已确认可用') : '';
     const reviewBtns = (t.status==='success' && t.qa) ? `
-      <button class="ghost" onclick="reviewTask('${t.task_id}',true)">✓ 复核通过</button>
-      <button class="ghost" onclick="reviewTask('${t.task_id}',false)">✗ 复核不通过</button>` : '';
-    const qa = t.qa ? `<h3>QA（score ${t.qa.score}, ${t.qa.passed?'通过':'未通过'}，${reviewState}）${reviewBtns}</h3>
-      <pre>${esc(JSON.stringify(t.qa.issues.length?t.qa.issues:t.qa.checks, null, 2))}</pre>` : '';
+      <button class="ghost" onclick="reviewTask('${t.task_id}',true)">✓ 确认可用</button>
+      <button class="ghost" onclick="reviewTask('${t.task_id}',false)">✗ 不合格</button>` : '';
+    const qa = t.qa ? `<h3>自动检查（${t.qa.passed?'通过':'发现问题'}，${reviewState}）${reviewBtns}</h3>
+      ${t.qa.issues.length?`<pre>${esc(JSON.stringify(t.qa.issues, null, 2))}</pre>`:''}` : '';
     const img = t.status==='success' ? `<img class="preview" src="/api/tasks/${id}/image">` : '';
-    const attempts = (t.attempts||[]).map(a =>
-      `<tr><td>#${a.attempt_no}</td><td>${esc(a.outcome)}</td><td>${a.duration_ms??''}ms</td>
-       <td>${esc(a.external_request_id||'')}</td><td>${esc(a.error_code||'')}</td></tr>`).join('');
     $('#detailBox').innerHTML = `
-      <div class="flex"><h2 style="margin:0">${esc(t.task_id)}</h2>
-        <span class="pill ${esc(t.status)}">${esc(t.status)}</span>
-        <span class="muted">${esc(t.sku)} · ${esc(t.output_type)} · ${esc(t.model)}</span></div>
+      <div class="flex"><h2 style="margin:0">${esc(t.sku)} · ${esc(TYPE_LABEL[t.output_type]||t.output_type)}</h2>
+        <span class="pill ${esc(t.status)}">${esc(t.status)}</span></div>
       ${t.error_message?`<p style="color:var(--bad)">${esc(t.error_code)}: ${esc(t.error_message)}</p>`:''}
       ${img}
-      <h3>Prompt（${esc(t.prompt_version)}）</h3><pre>${esc(t.prompt)}</pre>
-      <h3>Negative prompt</h3><pre>${esc(t.negative_prompt)}</pre>
-      <h3>调用记录</h3>
-      <table><thead><tr><th>#</th><th>结果</th><th>耗时</th><th>请求ID</th><th>错误</th></tr></thead>
-      <tbody>${attempts||'<tr><td colspan=5 class=muted>无</td></tr>'}</tbody></table>
-      ${qa}`;
+      ${qa}
+      <p class="muted" style="font-size:12px">任务 ${esc(t.task_id)} · 模型 ${esc(t.model)} · prompt 版本 ${esc(t.prompt_version)}</p>`;
     $('#detail').style.display = 'flex';
   } catch(e){ toast(e.message, 5000); }
 }
@@ -260,22 +344,17 @@ async function showTask(id){
 async function loadStats(){
   const s = await api('/api/stats');
   const t = s.tasks;
-  const cost = (s.cost_usd.actual_recorded + s.cost_usd.estimated_for_success_without_actual).toFixed(2);
   $('#statCards').innerHTML = [
-    ['总任务', t.total], ['成功', t.success], ['失败', t.failed],
-    ['进行中', t.running + t.pending + t.retrying],
-    ['成功率', t.success_rate==null?'—':(t.success_rate*100).toFixed(1)+'%'],
-    ['重试次数', t.total_retries], ['成本(USD)', '≈'+cost],
+    ['排队/生成中', t.pending + t.running + t.retrying],
+    ['已完成', t.success], ['失败', t.failed],
+    ['成功率', t.success_rate==null?'—':(t.success_rate*100).toFixed(0)+'%'],
   ].map(([k,v])=>`<div class="card"><b>${v}</b><span>${k}</span></div>`).join('');
-  const done = s.per_sku.filter(r=>r.complete).length;
-  $('#skuStats').textContent = `SKU 完成情况: ${done}/${s.per_sku.length} 个款式已有两类成品图`
-    + (s.failure_reasons.length ? ' | 失败原因: ' + s.failure_reasons.map(r=>`${r.error_code}×${r.n}`).join('，') : '');
 }
 
 async function doExport(){
   try {
     const out = await api('/api/export', {method:'POST', body: JSON.stringify({})});
-    toast(`导出完成: ${out.item_count} 个款式 → ${out.export_dir}`, 8000);
+    toast(`素材包已导出: ${out.item_count} 个款式 → ${out.export_dir}`, 8000);
   } catch(e){ toast('导出失败: ' + e.message, 6000); }
 }
 

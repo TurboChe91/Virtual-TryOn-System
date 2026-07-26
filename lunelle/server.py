@@ -18,10 +18,20 @@ from .config import Config, load_config
 from .db import Database, db_healthy, migrate
 from .export import ExportError, run_export
 from .logging_setup import setup_logging
-from .models import OUTPUT_TYPES, STATUSES, IllegalTransition
+from .models import OUTPUT_GRID, OUTPUT_HERO, OUTPUT_TYPES, STATUSES, IllegalTransition
+from .profiles import ProfileService
 from .providers import build_chat_fn, build_provider
 from .qa import run_qa
-from .schemas import ExportRequest, GenerateRequest, RetryRequest, ReviewRequest, StyleCreateRequest
+from .schemas import (
+    ExportRequest,
+    GenerateRequest,
+    IdentityRequest,
+    ProfileCreateRequest,
+    ProfileUpdateRequest,
+    RetryRequest,
+    ReviewRequest,
+    StyleCreateRequest,
+)
 from .stats import collect_stats
 from .styles import StyleInputError, build_style_spec
 from .tasks import ConflictError, NotFoundError, TaskService
@@ -51,6 +61,7 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         app.state.db = db
         app.state.service = service
         app.state.worker = worker
+        app.state.profiles = ProfileService(db)
         if start_worker and os.environ.get("LUNELLE_DISABLE_WORKER") != "1":
             worker.start()
         logger.info(
@@ -178,15 +189,9 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
             },
         }
 
-    @app.post("/api/styles/{style_id}/reference-image",
-              dependencies=[Depends(require_admin)])
-    async def upload_reference(style_id: str, request: Request,
-                               file: UploadFile = File(...)):  # noqa: B008 - FastAPI dependency idiom
-        service: TaskService = request.app.state.service
-        service.get_style(style_id)  # 404 if missing
-
+    def _validated_upload(data: bytes) -> tuple[str, str]:
+        """Shared image-upload validation: returns (format, extension)."""
         limit = config.max_upload_mb * 1024 * 1024
-        data = await file.read(limit + 1)
         if len(data) > limit:
             raise HTTPException(status_code=413,
                                 detail=f"file exceeds {config.max_upload_mb}MB limit")
@@ -202,14 +207,109 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         if fmt not in ALLOWED_UPLOAD_FORMATS:
             raise HTTPException(status_code=422,
                                 detail=f"unsupported format {fmt}; allowed: PNG, JPEG, WEBP")
+        return fmt, ALLOWED_UPLOAD_FORMATS[fmt]
 
+    @app.post("/api/styles/{style_id}/reference-image",
+              dependencies=[Depends(require_admin)])
+    async def upload_reference(style_id: str, request: Request,
+                               kind: str = Query("reference", pattern="^(reference|plan)$"),
+                               file: UploadFile = File(...)):  # noqa: B008 - FastAPI dependency idiom
+        """Store a style asset: kind=reference (photo/style ref) or kind=plan (2x5 set plan)."""
+        service: TaskService = request.app.state.service
+        service.get_style(style_id)  # 404 if missing
+        data = await file.read(config.max_upload_mb * 1024 * 1024 + 1)
+        fmt, ext = _validated_upload(data)
         # Server-generated name: user filenames never touch the filesystem.
         digest = hashlib.sha256(data).hexdigest()[:12]
-        dest = config.upload_dir / style_id / f"ref-{digest}{ALLOWED_UPLOAD_FORMATS[fmt]}"
+        prefix = "plan" if kind == "plan" else "ref"
+        dest = config.upload_dir / style_id / f"{prefix}-{digest}{ext}"
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
-        service.set_reference_image(style_id, dest)
-        return {"stored": str(dest.name), "format": fmt, "bytes": len(data)}
+        if kind == "plan":
+            service.set_plan_image(style_id, dest)
+        else:
+            service.set_reference_image(style_id, dest)
+        return {"stored": str(dest.name), "kind": kind, "format": fmt, "bytes": len(data)}
+
+    @app.post("/api/styles/from-image", status_code=201, dependencies=[Depends(require_admin)])
+    async def create_style_from_image(request: Request,
+                                      file: UploadFile = File(...),  # noqa: B008 - FastAPI idiom
+                                      sku: str = Query("", max_length=48)):
+        """Customer flow B: upload a design photo, let the vision LLM draft the style."""
+        from . import vocab
+        from .llm import LLMUnavailable, build_llm_chat, style_fields_from_image
+
+        service: TaskService = request.app.state.service
+        data = await file.read(config.max_upload_mb * 1024 * 1024 + 1)
+        _fmt, ext = _validated_upload(data)
+        digest = hashlib.sha256(data).hexdigest()[:12]
+        staging = config.upload_dir / "_incoming" / f"style-{digest}{ext}"
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_bytes(data)
+
+        try:
+            chat = build_llm_chat(config, request.app.state.db)
+        except LLMUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            fields = style_fields_from_image(chat, staging)
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=f"识别失败: {exc}") from exc
+        # Vocab enums are suggestions from the model; invalid ones fall back to defaults.
+        if fields.get("shape") not in vocab.SHAPES:
+            fields.pop("shape", None)
+        if fields.get("length") not in vocab.LENGTHS:
+            fields.pop("length", None)
+
+        body = StyleCreateRequest(sku=sku or None, **fields)
+        outcome = build_style_spec(body, service.taken_skus())
+        style = service.create_style(
+            outcome.spec, source_type="hybrid",
+            source_input={"from_image": True, **body.model_dump()},
+            parser="vision-llm", warnings=outcome.warnings,
+        )
+        dest = config.upload_dir / style["style_id"] / f"ref-{digest}{ext}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        staging.replace(dest)
+        service.set_reference_image(style["style_id"], dest)
+        style = service.get_style(style["style_id"])
+        return {"style": style, "recognized": fields, "warnings": outcome.warnings,
+                "parser": "vision-llm"}
+
+    @app.post("/api/styles/{style_id}/identify", dependencies=[Depends(require_admin)])
+    def identify_style(style_id: str, request: Request):
+        """Vision LLM writes the ten-nail identity text from the plan (or reference) image."""
+        from .llm import LLMUnavailable, build_llm_chat, identify_nail_identities
+
+        service: TaskService = request.app.state.service
+        style = service.get_style(style_id)
+        source = None
+        for key in ("plan_image_path", "reference_image_path"):
+            candidate = Path(style.get(key) or "")
+            if candidate.is_file():
+                source = candidate
+                break
+        if source is None:
+            raise HTTPException(status_code=409,
+                                detail="style has no plan or reference image; upload one first")
+        try:
+            chat = build_llm_chat(config, request.app.state.db)
+        except LLMUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            identity = identify_nail_identities(chat, source)
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=f"识别失败: {exc}") from exc
+        service.set_identity_text(style_id, identity)
+        return {"style_id": style_id, "identity_text": identity,
+                "source": source.name}
+
+    @app.put("/api/styles/{style_id}/identity", dependencies=[Depends(require_admin)])
+    def set_identity(style_id: str, body: IdentityRequest, request: Request):
+        service: TaskService = request.app.state.service
+        service.get_style(style_id)
+        service.set_identity_text(style_id, body.identity_text)
+        return {"style_id": style_id, "identity_set": bool(body.identity_text.strip())}
 
     # ---------------- generation & tasks ----------------
 
@@ -266,7 +366,12 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         task = service.get_task(task_id, with_details=False)
         if task["status"] != "success" or not task.get("output_path"):
             raise ConflictError("QA can only run on successful tasks with an output image")
-        size = config.grid_size if task["output_type"] == "grid" else config.wearing_size
+        if task["output_type"] == OUTPUT_GRID:
+            size = config.grid_size
+        elif task["output_type"] == OUTPUT_HERO:
+            size = config.hero_size
+        else:
+            size = config.wearing_size
         grid_path = None
         if task["output_type"] == "wearing":
             grid_task = service.latest_successful_grid(task["style_id"])
@@ -309,6 +414,126 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         return {"task_id": task_id, "approved": body.approved,
                 "needs_human_review": not body.approved}
 
+    # ---------------- API channel profiles ----------------
+
+    @app.get("/api/profiles")
+    def list_profiles(request: Request, kind: str | None = Query(None, pattern="^(image|llm)$")):
+        profiles: ProfileService = request.app.state.profiles
+        return {"profiles": profiles.list_profiles(kind=kind),
+                "env_fallback_model": config.image_model,
+                "env_fallback_llm": config.text_model or None}
+
+    @app.post("/api/profiles", status_code=201, dependencies=[Depends(require_admin)])
+    def create_profile(body: ProfileCreateRequest, request: Request):
+        profiles: ProfileService = request.app.state.profiles
+        try:
+            return profiles.create(**body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put("/api/profiles/{profile_id}", dependencies=[Depends(require_admin)])
+    def update_profile(profile_id: str, body: ProfileUpdateRequest, request: Request):
+        profiles: ProfileService = request.app.state.profiles
+        try:
+            return profiles.update(profile_id, body.model_dump(exclude_none=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/api/profiles/{profile_id}", status_code=204,
+                dependencies=[Depends(require_admin)])
+    def delete_profile(profile_id: str, request: Request):
+        request.app.state.profiles.delete(profile_id)
+
+    @app.post("/api/profiles/{profile_id}/activate", dependencies=[Depends(require_admin)])
+    def activate_profile(profile_id: str, request: Request):
+        return request.app.state.profiles.activate(profile_id)
+
+    @app.post("/api/profiles/deactivate", dependencies=[Depends(require_admin)])
+    def deactivate_profiles(request: Request,
+                            kind: str | None = Query(None, pattern="^(image|llm)$")):
+        request.app.state.profiles.deactivate_all(kind=kind)
+        return {"active": None, "fallback": "environment configuration"}
+
+    @app.post("/api/profiles/{profile_id}/test", dependencies=[Depends(require_admin)])
+    def test_profile(profile_id: str, request: Request):
+        """Cheap connectivity + auth probe: GET {base_url}/models, no image cost."""
+        import httpx
+
+        profiles: ProfileService = request.app.state.profiles
+        row = profiles._get_row(profile_id)  # noqa: SLF001 - server needs the raw key once
+        try:
+            response = httpx.get(
+                f"{row['base_url']}/models",
+                headers={"Authorization": f"Bearer {row['api_key']}"},
+                timeout=15,
+            )
+        except httpx.HTTPError as exc:
+            return {"ok": False, "stage": "transport", "detail": str(exc)[:200]}
+        if response.status_code != 200:
+            return {"ok": False, "stage": "auth_or_endpoint",
+                    "http_status": response.status_code,
+                    "detail": response.text[:200]}
+        model_present = None
+        try:
+            ids = [m.get("id") for m in response.json().get("data", [])]
+            model_present = row["model"] in ids
+        except (ValueError, AttributeError):
+            ids = []
+        return {"ok": True, "http_status": 200, "models_listed": len(ids),
+                "configured_model_present": model_present}
+
+    # ---------------- hand models (per skin tone) ----------------
+
+    SKIN_TONES = ("light", "medium", "tan", "deep")
+
+    def _hand_model_setting(conn, tone: str) -> str | None:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (f"hand_model_{tone}",)
+        ).fetchone()
+        return row["value"] if row else None
+
+    @app.get("/api/settings/hand-models")
+    def hand_models(request: Request):
+        conn = request.app.state.db.conn()
+        out = {}
+        for tone in SKIN_TONES:
+            path = _hand_model_setting(conn, tone)
+            out[tone] = {"configured": bool(path and Path(path).is_file())}
+        return {"hand_models": out}
+
+    @app.post("/api/settings/hand-models/{tone}", dependencies=[Depends(require_admin)])
+    async def upload_hand_model(tone: str, request: Request,
+                                file: UploadFile = File(...)):  # noqa: B008 - FastAPI idiom
+        if tone not in SKIN_TONES:
+            raise HTTPException(status_code=422, detail=f"tone must be one of {SKIN_TONES}")
+        data = await file.read(config.max_upload_mb * 1024 * 1024 + 1)
+        fmt, ext = _validated_upload(data)
+        dest = config.upload_dir / "hand-models" / f"{tone}{ext}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        from .db import transaction, utcnow
+        conn = request.app.state.db.conn()
+        with transaction(conn):
+            conn.execute(
+                "INSERT INTO app_settings (key, value, updated_at) VALUES (?,?,?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+                " updated_at = excluded.updated_at",
+                (f"hand_model_{tone}", str(dest), utcnow()),
+            )
+        return {"tone": tone, "stored": dest.name, "format": fmt, "bytes": len(data)}
+
+    @app.get("/api/settings/hand-models/{tone}/image")
+    def hand_model_image(tone: str, request: Request):
+        if tone not in SKIN_TONES:
+            raise HTTPException(status_code=422, detail=f"tone must be one of {SKIN_TONES}")
+        path_text = _hand_model_setting(request.app.state.db.conn(), tone)
+        if not path_text or not Path(path_text).is_file():
+            raise HTTPException(status_code=404, detail="hand model not configured")
+        path = Path(path_text).resolve()
+        if not path.is_relative_to(config.upload_dir.resolve()):
+            raise HTTPException(status_code=403, detail="path outside storage root")
+        return FileResponse(path)
+
     # ---------------- batches / stats / export ----------------
 
     @app.get("/api/batches")
@@ -333,6 +558,11 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
     @app.get("/", response_class=HTMLResponse)
     def index():
         html_path = Path(__file__).parent / "web" / "index.html"
+        return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings_page():
+        html_path = Path(__file__).parent / "web" / "settings.html"
         return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
     return app

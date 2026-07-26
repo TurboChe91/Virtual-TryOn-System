@@ -160,6 +160,7 @@ class OpenAICompatProvider(ImageProvider):
             body["image"] = [_data_url(p) for p in request.reference_images]
         if self.settings.disable_watermark and request.model.startswith("doubao-seedream"):
             body["watermark"] = False  # Volcano Ark param; ignored by other providers
+        body.update(request.extra)
         response = self._post(f"{self.settings.base_url}/images/generations", json_body=body)
         return self._parse_response(response, request, reference_used=include_reference)
 
@@ -174,6 +175,7 @@ class OpenAICompatProvider(ImageProvider):
             "size": f"{request.size[0]}x{request.size[1]}",
             "n": "1",
         }
+        data.update({k: str(v) for k, v in request.extra.items()})
         response = self._post(f"{self.settings.base_url}/images/edits", files=files, data=data)
         return self._parse_response(response, request, reference_used=True)
 

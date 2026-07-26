@@ -17,9 +17,12 @@ tasks stay reproducible.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
+from importlib import resources
 
-from .models import OUTPUT_GRID, OUTPUT_WEARING
+from .models import OUTPUT_GRID, OUTPUT_HERO, OUTPUT_WEARING
 from .schemas import StyleSpec
 
 # pv-2: dropped the quoted style name from the identity block — the model
@@ -49,6 +52,7 @@ BASE_NEGATIVE = (
 class PromptBundle:
     grid_prompt: str
     wearing_prompt: str
+    hero_prompt: str
     negative_prompt: str
     quality_requirements: dict
     prompt_version: str
@@ -107,7 +111,8 @@ GRID_REFERENCE_BLOCK = """INPUT AUTHORITY:
 
 def strip_reference_block(prompt: str) -> str:
     """Remove the Image-1 authority block for text-only sends (no reference available)."""
-    return prompt.replace(WEARING_REFERENCE_BLOCK, "").replace(GRID_REFERENCE_BLOCK, "")
+    stripped = prompt.replace(WEARING_REFERENCE_BLOCK, "").replace(GRID_REFERENCE_BLOCK, "")
+    return stripped.replace(HERO_REFERENCE_BLOCK, "")
 
 
 def build_grid_prompt(spec: StyleSpec, with_reference: bool = False) -> str:
@@ -146,6 +151,67 @@ NAIL SET IDENTITY (the five visible nails wear this exact design — do not swap
 Natural press-on attachment: each nail sits on the real nail bed with subtle cuticle shadow, curved glossy highlight following the nail's arc, and correct perspective along each finger's axis. Preserve true material depth: pearls round, crystals faceted, metal reflective, raised elements casting tiny shadows — never flat stickers or printed decals.
 
 No text, letters, numbers, labels, boxes, logos, or watermarks."""
+
+
+# ---- hero (contract-locked Shopify listing shot) ---------------------------
+#
+# Ported from the predecessor pipeline's run_imagegen_direct.py: the ten-slot
+# screen-order contract proved to be the single most important defence against
+# slot-binding errors (swapped/duplicated nail identities). The contract JSON
+# is versioned by content hash inside the task's prompt_version.
+
+_HERO_CONTRACT_TEXT = (
+    resources.files("lunelle").joinpath("contracts/hero_pose_contract.json").read_text("utf-8")
+)
+HERO_CONTRACT = json.loads(_HERO_CONTRACT_TEXT)
+HERO_CONTRACT_SHA = hashlib.sha256(_HERO_CONTRACT_TEXT.encode()).hexdigest()[:8]
+HERO_PROMPT_VERSION = f"hv-1+{HERO_CONTRACT_SHA}"
+
+HERO_REFERENCE_BLOCK = """INPUT AUTHORITY — do not mix these roles:
+- Image 1 is the nail set plan. It is the ONLY authority for nail-art colors, textures, motifs, exact counts, 3D decorations, and each individual nail's length and silhouette. Its layout, spacing, labels, and background are packaging only; never render them.
+- Image 2 is the photography reference. It is the ONLY authority for hand pose, hand geometry, background, crop, lighting, and skin appearance. NEVER copy its manicure design, nail length, or nail silhouette.
+
+"""
+
+
+def _hero_view_contract() -> str:
+    slots = HERO_CONTRACT["screen_slots"]
+    return "\n".join(
+        [
+            f"Pose: {HERO_CONTRACT['pose']}",
+            "LEFT-side hand upper fingers, absolute SCREEN LEFT-to-RIGHT = "
+            + ", ".join(slots["left_upper_fingers_left_to_right"]) + ".",
+            f"LEFT thumb = {slots['left_thumb']['nail_id']} at {slots['left_thumb']['position']}.",
+            "RIGHT-side hand upper fingers, absolute SCREEN LEFT-to-RIGHT = "
+            + ", ".join(slots["right_upper_fingers_left_to_right"]) + ".",
+            f"RIGHT thumb = {slots['right_thumb']['nail_id']} at {slots['right_thumb']['position']}.",
+            "Do not infer order from anatomy. Do not mirror or reverse either hand.",
+            f"Background: {HERO_CONTRACT['background']}",
+            f"Lighting: {HERO_CONTRACT['lighting']}",
+            f"Framing: {HERO_CONTRACT['framing']}",
+        ]
+    )
+
+
+def build_hero_prompt(spec: StyleSpec, identity_text: str | None, with_reference: bool) -> str:
+    """Two-hand Shopify listing hero. identity_text (per-nail identities, the
+    predecessor identity.txt format) beats the set-level spec block when given."""
+    reference_block = HERO_REFERENCE_BLOCK if with_reference else ""
+    identity_block = (identity_text or "").strip() or build_identity_block(spec)
+    return f"""{reference_block}Photorealistic Shopify listing hero for a press-on nail set: two complete hands wearing the full ten-nail set.
+
+HIGHEST-PRIORITY VIEW CONTRACT:
+{_hero_view_contract()}
+
+STYLE IDENTITY ONLY — nail art plus per-nail shape; never pose, screen order, or scene:
+{identity_block}
+
+Hard constraints:
+- Use every visible nail identity exactly once in the contract slots; do not swap, duplicate, omit, homogenize, or invent.
+- Nail length and silhouette follow the plan per nail; never homogenize the ten nails into one shared shape.
+- Preserve true material depth: natural press-on attachment, cuticle shadows, glossy curved highlights, and dimensional metal/gems/pearls where the style calls for them.
+- Keep complete hands and wrists inside the frame with a generous cream-curtain margin.
+- No text, labels, boxes, grid lines, logos, or watermarks in the output."""
 
 
 def build_negative_prompt(spec: StyleSpec) -> str:
@@ -188,10 +254,13 @@ def build_prompt_bundle(
     wearing_size: tuple[int, int],
     with_reference: bool = True,
     with_grid_reference: bool = False,
+    identity_text: str | None = None,
+    with_hero_reference: bool = True,
 ) -> PromptBundle:
     return PromptBundle(
         grid_prompt=build_grid_prompt(spec, with_reference=with_grid_reference),
         wearing_prompt=build_wearing_prompt(spec, with_reference=with_reference),
+        hero_prompt=build_hero_prompt(spec, identity_text, with_reference=with_hero_reference),
         negative_prompt=build_negative_prompt(spec),
         quality_requirements=build_quality_requirements(spec, grid_size, wearing_size),
         prompt_version=PROMPT_VERSION,
@@ -203,4 +272,11 @@ def prompt_for_output_type(bundle: PromptBundle, output_type: str) -> str:
         return bundle.grid_prompt
     if output_type == OUTPUT_WEARING:
         return bundle.wearing_prompt
+    if output_type == OUTPUT_HERO:
+        return bundle.hero_prompt
     raise ValueError(f"unknown output type {output_type!r}")
+
+
+def prompt_version_for(output_type: str) -> str:
+    """Hero carries its own version (wording + contract hash)."""
+    return HERO_PROMPT_VERSION if output_type == OUTPUT_HERO else PROMPT_VERSION
