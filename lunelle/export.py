@@ -63,9 +63,9 @@ def _latest_success(conn, style_id: str, output_type: str) -> dict | None:
 
 def _convert_to_webp(source: Path, dest: Path) -> str:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with Image.open(source) as image:
-        image = image.convert("RGB")
-        image.save(dest, format="WEBP", quality=WEBP_QUALITY, method=6)
+    with Image.open(source) as opened:
+        converted = opened.convert("RGB")
+        converted.save(dest, format="WEBP", quality=WEBP_QUALITY, method=6)
     return hashlib.sha256(dest.read_bytes()).hexdigest()
 
 

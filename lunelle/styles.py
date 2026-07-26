@@ -229,7 +229,7 @@ def parse_with_llm(
     merged["shape"] = vocab.SHAPE_KEYWORDS.get(str(merged["shape"]).lower(), merged["shape"])
     merged["length"] = vocab.LENGTH_KEYWORDS.get(str(merged["length"]).lower(), merged["length"])
     try:
-        spec = StyleSpec(**merged)
+        spec = StyleSpec(**merged)  # type: ignore[arg-type]  # validated by pydantic
     except ValidationError as exc:
         raise StyleInputError(f"LLM output failed validation: {exc.errors()[0]['msg']}") from exc
     return spec, []

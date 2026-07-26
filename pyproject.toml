@@ -27,3 +27,8 @@ filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
   "real_api: tests that call the real paid image API (opt-in via RUN_REAL_E2E=1)",
 ]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true

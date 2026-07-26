@@ -89,7 +89,7 @@ def setup_logging(log_dir: Path, level: str = "INFO", console: bool = True) -> N
 class TaskLogger(logging.LoggerAdapter):
     """Logger adapter that stamps task context onto every record."""
 
-    def process(self, msg: str, kwargs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    def process(self, msg, kwargs):  # type: ignore[override]  # kwargs is a MutableMapping
         ctx = dict(self.extra or {})
         extra_ctx = kwargs.pop("ctx", None)
         if extra_ctx:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import cast
 
 from PIL import Image
 
@@ -54,9 +55,8 @@ MANUAL_REVIEW_ITEMS = {
 
 
 def _load_scaled(path: Path) -> Image.Image:
-    image = Image.open(path)
-    image.load()
-    image = image.convert("RGB")
+    with Image.open(path) as source:
+        image: Image.Image = source.convert("RGB")
     w, h = image.size
     scale = max(w, h) / ANALYSIS_MAX_SIDE
     if scale > 1:
@@ -64,7 +64,7 @@ def _load_scaled(path: Path) -> Image.Image:
     return image
 
 def _border_color(pixels, w: int, h: int) -> tuple[int, int, int]:
-    samples = []
+    samples: list[tuple[int, int, int]] = []
     for x in range(0, w, max(1, w // 50)):
         samples.append(pixels[x, 0])
         samples.append(pixels[x, h - 1])
@@ -82,12 +82,13 @@ def _border_color(pixels, w: int, h: int) -> tuple[int, int, int]:
 def _foreground_mask(image: Image.Image) -> tuple[list[list[bool]], int, int]:
     w, h = image.size
     pixels = image.load()
+    assert pixels is not None
     bg = _border_color(pixels, w, h)
     mask = [[False] * w for _ in range(h)]
     for y in range(h):
         row = mask[y]
         for x in range(w):
-            p = pixels[x, y]
+            p = cast(tuple[int, int, int], pixels[x, y])
             if (
                 abs(p[0] - bg[0]) > FOREGROUND_DELTA
                 or abs(p[1] - bg[1]) > FOREGROUND_DELTA
@@ -148,6 +149,7 @@ def dominant_colors(path: Path, count: int = 5, *, foreground_only: bool) -> lis
     if foreground_only:
         mask, w, h = _foreground_mask(image)
         pixels = image.load()
+        assert pixels is not None
         fg = [pixels[x, y] for y in range(h) for x in range(w) if mask[y][x]]
         if not fg:
             return []
@@ -155,11 +157,13 @@ def dominant_colors(path: Path, count: int = 5, *, foreground_only: bool) -> lis
         sample.putdata(fg)
         image = sample
     quantized = image.quantize(colors=count, method=Image.Quantize.FASTOCTREE)
-    palette = quantized.getpalette() or []
+    palette = list(quantized.getpalette() or [])
     color_counts = sorted(quantized.getcolors() or [], reverse=True)
-    out = []
+    out: list[tuple[int, int, int]] = []
     for _, index in color_counts[:count]:
-        out.append(tuple(palette[index * 3: index * 3 + 3]))
+        i = cast(int, index)  # getcolors() index type is loose in PIL stubs
+        r, g, b = palette[i * 3: i * 3 + 3]
+        out.append((int(r), int(g), int(b)))
     return out
 
 
@@ -267,7 +271,9 @@ def run_qa(
             for gc in grid_colors:
                 best = min((_color_distance(gc, wc) for wc in wearing_colors), default=999.0)
                 matches.append({"grid_color": list(gc), "best_distance": round(best, 1)})
-            matched = sum(1 for m in matches if m["best_distance"] <= COLOR_MATCH_THRESHOLD)
+            matched = sum(
+                1 for m in matches if float(str(m["best_distance"])) <= COLOR_MATCH_THRESHOLD
+            )
             consistent = not grid_colors or matched >= max(1, len(grid_colors) - 1)
             record(
                 "color_consistency",
