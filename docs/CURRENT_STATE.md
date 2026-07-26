@@ -15,7 +15,13 @@
 - QA：8 项确定性检查 + 自适应 2×5 计数（3 张真实图全部正确识别 10 枚）
 - 导出：webp + manifest + products.csv + generation-report.csv（真实数据验证）
 - 全新环境：git archive 干净源 → --no-cache 构建 → 新卷新库 → 真实双图 → 重启数据保留
-- 质量门：pytest 119 通过 / ruff 0 / mypy 0
+- 质量门：pytest 130 通过 / ruff 0 / mypy 0
+- 生产就绪审查（多智能体对抗式，25 agent）发现 19 项确认问题，全部修复并回归：
+  生产强制 ADMIN_TOKEN、容器优雅停机(exec+SIGTERM, 0.4s)、healthcheck 端口跟随环境、
+  compose 固定 LUNELLE_ENV+stdout 日志轮转、下载禁跟随重定向(SSRF)、手动重试重置预算、
+  内部错误纳入退避重试、并发状态竞争返回 409、人工复核端点+界面(needs_human_review 闭环)、
+  上传参考图接入 grid 生成主流程(pv-3)、无参考时剥离 Image 1 提示块、导出原子化+目录防撞、
+  迁移跨进程 TOCTOU、停机排水等待在途任务
 
 ## 已实现未完全验证 ⚠️
 
@@ -26,7 +32,7 @@
 
 ## 未实现 ❌
 
-- 参考图驱动的款式识别（上传图→自动 StyleSpec）：上传与存储已就绪，识别未接
+- 参考图→自动 StyleSpec 识别未实现；但上传参考图已接入 grid 生成（作为 Image 1 设计权威）
 - 多肤色×多视角矩阵（前身项目的 4×4 matrix）：当前每款一张佩戴图（skin_tone 可选）
 - 视觉级自动 QA（水印 OCR、手部关键点）：设计为人工复核项
 
