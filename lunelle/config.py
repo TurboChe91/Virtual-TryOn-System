@@ -135,6 +135,11 @@ class Config:
         else:
             if not self.image_api_key:
                 problems.append("LUNELLE_IMAGE_API_KEY is required for image generation.")
+            elif self.image_api_key == "sk-your-key-here":
+                problems.append(
+                    "LUNELLE_IMAGE_API_KEY still holds the .env.example placeholder; "
+                    "set your real key."
+                )
             if not self.image_api_base_url:
                 problems.append("LUNELLE_IMAGE_API_BASE_URL is required for image generation.")
             elif not self.image_api_base_url.startswith("https://"):
