@@ -1,0 +1,20 @@
+services:
+  lunelle:
+    build: .
+    image: lunelle-studio:latest
+    container_name: lunelle-studio
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Container-internal paths/binding always win over .env values.
+      LUNELLE_DATA_DIR: /data
+      LUNELLE_HOST: 0.0.0.0
+      LUNELLE_PORT: "8300"
+    ports:
+      # Bind to localhost only; put a reverse proxy in front for public access.
+      - "127.0.0.1:8300:8300"
+    volumes:
+      - lunelle-data:/data
+
+volumes:
+  lunelle-data:
