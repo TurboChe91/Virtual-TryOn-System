@@ -21,6 +21,7 @@ from .config import Config
 from .db import Database
 from .logging_setup import task_logger
 from .models import OUTPUT_GRID, OUTPUT_WEARING
+from .prompts import strip_reference_block
 from .providers import GenerationRequest, ImageProvider, ProviderError
 from .qa import run_qa, store_qa_result
 from .tasks import TaskService
@@ -55,6 +56,13 @@ class Worker:
         self._stop.set()
         for thread in self._threads:
             thread.join(timeout=timeout)
+        alive = [t.name for t in self._threads if t.is_alive()]
+        if alive:
+            logger.warning("worker threads still running at shutdown: %s", alive)
+            # Keep the stop flag set so the leftover daemon threads exit after
+            # their in-flight provider call instead of claiming new work.
+            self._threads = [t for t in self._threads if t.is_alive()]
+            return
         self._threads.clear()
         self._stop.clear()
 
@@ -81,11 +89,14 @@ class Worker:
                     "unexpected executor crash", extra={"ctx": {"task_id": task["task_id"]}}
                 )
                 try:
+                    # Bounded by max_retries; transient surprises (file races,
+                    # DB lock timeouts) deserve the same retry budget as
+                    # `interrupted` recovery instead of a permanent failure.
                     self.service.complete_failure(
                         task["task_id"],
                         error_code="internal",
                         error_message="unexpected internal error; see logs",
-                        retryable=False,
+                        retryable=True,
                     )
                 except Exception:  # noqa: BLE001 - keep the loop alive no matter what
                     logger.exception("failed to record task failure")
@@ -104,9 +115,18 @@ class Worker:
             model=task["model"],
         )
         references = self._resolve_references(task, log)
+        prompt = task["prompt"]
+        expected_reference = task["metadata"].get("use_reference") or task["metadata"].get(
+            "use_style_reference"
+        )
+        if expected_reference and not references:
+            # Text-only fallback: the stored prompt must not claim an Image 1 exists.
+            prompt = strip_reference_block(prompt)
+            log.info("reference unavailable; stripped reference block from prompt",
+                     ctx={"stage": "reference"})
         size = self.config.grid_size if task["output_type"] == OUTPUT_GRID else self.config.wearing_size
         request = GenerationRequest(
-            prompt=task["prompt"],
+            prompt=prompt,
             negative_prompt=task["negative_prompt"],
             size=size,
             model=task["model"],
@@ -114,7 +134,7 @@ class Worker:
             reference_images=references,
         )
         fingerprint = hashlib.sha256(
-            f"{task['prompt']}|{size}|{task['model']}|{[str(r) for r in references]}".encode()
+            f"{prompt}|{size}|{task['model']}|{[str(r) for r in references]}".encode()
         ).hexdigest()[:16]
         attempt_no = self.service.start_attempt(
             task["task_id"], provider=self.provider.name, model=task["model"], fingerprint=fingerprint
@@ -208,6 +228,15 @@ class Worker:
             logger.exception("qa failure detail")
 
     def _resolve_references(self, task: dict, log) -> list[Path]:
+        if task["output_type"] == OUTPUT_GRID:
+            if not task["metadata"].get("use_style_reference"):
+                return []
+            ref = Path(task["metadata"].get("style_reference_path", ""))
+            if ref.is_file():
+                return [ref]
+            log.warning("uploaded style reference missing on disk; text-only grid",
+                        ctx={"stage": "reference"})
+            return []
         if task["output_type"] != OUTPUT_WEARING or not task["metadata"].get("use_reference"):
             return []
         grid_task = self.service.latest_successful_grid(task["style_id"])

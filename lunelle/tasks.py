@@ -146,11 +146,14 @@ class TaskService:
 
     def prompt_bundle_for(self, style: dict) -> PromptBundle:
         spec = self.spec_for(style)
+        use_refs = self.config.reference_mode != "off"
+        has_style_ref = bool(style.get("reference_image_path"))
         return build_prompt_bundle(
             spec,
             self.config.grid_size,
             self.config.wearing_size,
-            with_reference=self.config.reference_mode != "off",
+            with_reference=use_refs,
+            with_grid_reference=use_refs and has_style_ref,
         )
 
     @staticmethod
@@ -204,9 +207,10 @@ class TaskService:
                                         "output_type": output_type,
                                         "reason": "already succeeded; use force=true to regenerate"})
                         continue
-                    # failed / cancelled -> safe re-queue of the same task
+                    # failed / cancelled -> safe re-queue of the same task, fresh budget
                     self._transition_locked(conn, existing["task_id"], status, PENDING,
-                                            error_code=None, error_message=None, next_attempt_at=None)
+                                            error_code=None, error_message=None,
+                                            next_attempt_at=None, retry_count=0)
                     reused.append({"task_id": existing["task_id"], "status": PENDING,
                                    "output_type": output_type, "reason": "re-queued failed task"})
                     if output_type == OUTPUT_GRID:
@@ -220,6 +224,13 @@ class TaskService:
                     metadata["use_reference"] = True
                     if grid_task_id_this_round:
                         wait_for = grid_task_id_this_round
+                if (
+                    output_type == OUTPUT_GRID
+                    and self.config.reference_mode != "off"
+                    and style.get("reference_image_path")
+                ):
+                    metadata["use_style_reference"] = True
+                    metadata["style_reference_path"] = style["reference_image_path"]
                 conn.execute(
                     "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
                     " negative_prompt, prompt_version, provider, model, status, retry_count,"
@@ -501,6 +512,7 @@ class TaskService:
             error_code=None,
             error_message=None,
             next_attempt_at=None,
+            retry_count=0,  # a manual retry grants a fresh automatic-retry budget
             metadata_json=json.dumps(metadata, ensure_ascii=False),
         )
 

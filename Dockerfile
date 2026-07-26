@@ -26,7 +26,7 @@ EXPOSE 8300
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8300/health || exit 1
+    CMD curl -fsS "http://127.0.0.1:${LUNELLE_PORT:-8300}/health" || exit 1
 
 # init applies migrations and verifies config before the server starts.
-CMD ["sh", "-c", "python -m lunelle.cli init && python -m lunelle.cli serve"]
+CMD ["sh", "-c", "python -m lunelle.cli init && exec python -m lunelle.cli serve"]

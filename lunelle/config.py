@@ -150,6 +150,11 @@ class Config:
             problems.append("LUNELLE_GRID_IMAGE_SIZE must be square (1:1), e.g. 2048x2048.")
         if self.is_production and self.debug:
             problems.append("LUNELLE_DEBUG must be 0 in production.")
+        if self.is_production and not self.admin_token:
+            problems.append(
+                "LUNELLE_ADMIN_TOKEN is required in production; without it all "
+                "mutating (cost-incurring) endpoints would be unauthenticated."
+            )
         return problems
 
 

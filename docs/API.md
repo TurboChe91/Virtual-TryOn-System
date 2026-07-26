@@ -43,6 +43,8 @@ Base URL: `http://<host>:8300`。写操作在设置 `LUNELLE_ADMIN_TOKEN` 后需
 `POST /api/tasks/{task_id}/retry` — 手动重试，仅 failed/cancelled，409 其他状态。
 `POST /api/tasks/{task_id}/cancel` — 取消，仅 pending/retrying。
 `POST /api/tasks/{task_id}/qa` — 对成功任务重跑质检。
+`POST /api/tasks/{task_id}/review` — 记录人工复核结论，body `{approved: bool, note?}`；
+approved=true 会清除最新 QA 的 needs_human_review（配合导出的 include_unreviewed=false）。
 
 ## 批次 / 统计 / 导出
 

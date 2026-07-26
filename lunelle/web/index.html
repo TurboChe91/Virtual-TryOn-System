@@ -217,6 +217,12 @@ async function loadTasks(){
   </tr>`).join('') || '<tr><td colspan="9" class="muted">暂无任务</td></tr>';
 }
 
+async function reviewTask(id, approved){
+  try { await api(`/api/tasks/${id}/review`, {method:'POST', body: JSON.stringify({approved})});
+    toast(approved ? '已标记复核通过' : '已标记复核不通过'); showTask(id); }
+  catch(e){ toast('复核失败: ' + e.message, 6000); }
+}
+
 async function retryTask(id){
   try { await api(`/api/tasks/${id}/retry`, {method:'POST', body:'{}'}); toast('已重新入队'); loadTasks(); }
   catch(e){ toast('重试失败: ' + e.message, 6000); }
@@ -225,7 +231,11 @@ async function retryTask(id){
 async function showTask(id){
   try {
     const t = await api('/api/tasks/' + id);
-    const qa = t.qa ? `<h3>QA（score ${t.qa.score}, ${t.qa.passed?'通过':'未通过'}，需人工复核）</h3>
+    const reviewState = t.qa ? (t.qa.needs_human_review ? '待人工复核' : '已复核通过') : '';
+    const reviewBtns = (t.status==='success' && t.qa) ? `
+      <button class="ghost" onclick="reviewTask('${t.task_id}',true)">✓ 复核通过</button>
+      <button class="ghost" onclick="reviewTask('${t.task_id}',false)">✗ 复核不通过</button>` : '';
+    const qa = t.qa ? `<h3>QA（score ${t.qa.score}, ${t.qa.passed?'通过':'未通过'}，${reviewState}）${reviewBtns}</h3>
       <pre>${esc(JSON.stringify(t.qa.issues.length?t.qa.issues:t.qa.checks, null, 2))}</pre>` : '';
     const img = t.status==='success' ? `<img class="preview" src="/api/tasks/${id}/image">` : '';
     const attempts = (t.attempts||[]).map(a =>

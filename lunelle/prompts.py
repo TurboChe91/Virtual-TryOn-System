@@ -24,7 +24,10 @@ from .schemas import StyleSpec
 
 # pv-2: dropped the quoted style name from the identity block — the model
 #        occasionally typeset it as a title inside the image (no-text violation).
-PROMPT_VERSION = "pv-2"
+# pv-3: reference blocks extracted as removable constants (text-only fallback
+#        must not claim an Image 1 exists); grid prompt gains an optional
+#        uploaded-style-reference block.
+PROMPT_VERSION = "pv-3"
 
 SKIN_TONE_PHRASES = {
     "light": "light skin tone",
@@ -91,8 +94,25 @@ def build_identity_block(spec: StyleSpec) -> str:
     return "\n".join(lines)
 
 
-def build_grid_prompt(spec: StyleSpec) -> str:
-    return f"""Professional e-commerce product photograph of one complete press-on nail set: exactly 10 false nails, arranged in a strict grid of 2 rows and 5 columns on a seamless soft cream studio background.
+WEARING_REFERENCE_BLOCK = """INPUT AUTHORITY:
+- Image 1 is the product design plan for this press-on nail set. It is the ONLY authority for nail-art colors, motifs, decorations, finish, and nail shape/length. Its grid layout, spacing, and studio background are packaging only — NEVER reproduce the grid layout, floating nails, or plain background in the output; the nails must appear naturally worn on fingers.
+
+"""
+
+GRID_REFERENCE_BLOCK = """INPUT AUTHORITY:
+- Image 1 is a customer-supplied style reference photo. It is the ONLY authority for nail-art colors, motifs, decorations, and finish — reproduce that design faithfully across the ten nails. Ignore its background, layout, hands, and any text; never render them.
+
+"""
+
+
+def strip_reference_block(prompt: str) -> str:
+    """Remove the Image-1 authority block for text-only sends (no reference available)."""
+    return prompt.replace(WEARING_REFERENCE_BLOCK, "").replace(GRID_REFERENCE_BLOCK, "")
+
+
+def build_grid_prompt(spec: StyleSpec, with_reference: bool = False) -> str:
+    reference_block = GRID_REFERENCE_BLOCK if with_reference else ""
+    return f"""{reference_block}Professional e-commerce product photograph of one complete press-on nail set: exactly 10 false nails, arranged in a strict grid of 2 rows and 5 columns on a seamless soft cream studio background.
 
 LAYOUT CONTRACT:
 - exactly 10 nails total: 5 in the top row, 5 in the bottom row;
@@ -110,13 +130,7 @@ No text, letters, numbers, labels, boxes, grid lines, logos, or watermarks."""
 
 
 def build_wearing_prompt(spec: StyleSpec, with_reference: bool) -> str:
-    reference_block = (
-        """INPUT AUTHORITY:
-- Image 1 is the product design plan for this press-on nail set. It is the ONLY authority for nail-art colors, motifs, decorations, finish, and nail shape/length. Its grid layout, spacing, and studio background are packaging only — NEVER reproduce the grid layout, floating nails, or plain background in the output; the nails must appear naturally worn on fingers.
-"""
-        if with_reference
-        else ""
-    )
+    reference_block = WEARING_REFERENCE_BLOCK if with_reference else ""
     tone = SKIN_TONE_PHRASES[spec.skin_tone]
     return f"""Photorealistic Shopify listing photo of a real human hand wearing a press-on nail set.
 
@@ -173,9 +187,10 @@ def build_prompt_bundle(
     grid_size: tuple[int, int],
     wearing_size: tuple[int, int],
     with_reference: bool = True,
+    with_grid_reference: bool = False,
 ) -> PromptBundle:
     return PromptBundle(
-        grid_prompt=build_grid_prompt(spec),
+        grid_prompt=build_grid_prompt(spec, with_reference=with_grid_reference),
         wearing_prompt=build_wearing_prompt(spec, with_reference=with_reference),
         negative_prompt=build_negative_prompt(spec),
         quality_requirements=build_quality_requirements(spec, grid_size, wearing_size),

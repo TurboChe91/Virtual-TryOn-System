@@ -18,10 +18,10 @@ from .config import Config, load_config
 from .db import Database, db_healthy, migrate
 from .export import ExportError, run_export
 from .logging_setup import setup_logging
-from .models import OUTPUT_TYPES, STATUSES
+from .models import OUTPUT_TYPES, STATUSES, IllegalTransition
 from .providers import build_chat_fn, build_provider
 from .qa import run_qa
-from .schemas import ExportRequest, GenerateRequest, RetryRequest, StyleCreateRequest
+from .schemas import ExportRequest, GenerateRequest, RetryRequest, ReviewRequest, StyleCreateRequest
 from .stats import collect_stats
 from .styles import StyleInputError, build_style_spec
 from .tasks import ConflictError, NotFoundError, TaskService
@@ -61,8 +61,11 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         try:
             yield
         finally:
-            worker.stop()
-            db.close_all()
+            # Drain: give in-flight provider calls time to finish and record
+            # their results before connections are torn down.
+            worker.stop(timeout=config.request_timeout_s + 30)
+            if not worker.is_alive():
+                db.close_all()
 
     app = FastAPI(title="Lunelle Studio", version=__version__, lifespan=lifespan,
                   docs_url="/docs" if not config.is_production else None,
@@ -84,6 +87,12 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
 
     @app.exception_handler(ConflictError)
     async def _conflict(_req, exc):
+        return JSONResponse(status_code=409, content={"error": str(exc)})
+
+    @app.exception_handler(IllegalTransition)
+    async def _illegal_transition(_req, exc):
+        # A concurrent state change (e.g. worker claimed the task mid-request)
+        # is a conflict, not a server fault.
         return JSONResponse(status_code=409, content={"error": str(exc)})
 
     @app.exception_handler(StyleInputError)
@@ -269,6 +278,36 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         from .qa import store_qa_result
         store_qa_result(request.app.state.db, task_id, qa_doc)
         return qa_doc
+
+    @app.post("/api/tasks/{task_id}/review", dependencies=[Depends(require_admin)])
+    def review_task(task_id: str, body: ReviewRequest, request: Request):
+        """Record the human review verdict for a successful task's latest QA result."""
+        service: TaskService = request.app.state.service
+        task = service.get_task(task_id)
+        if task["status"] != "success":
+            raise ConflictError("only successful tasks can be reviewed")
+        if task["qa"] is None:
+            raise ConflictError("task has no QA result to review; run QA first")
+        from .db import transaction, utcnow
+        db: Database = request.app.state.db
+        conn = db.conn()
+        with transaction(conn):
+            conn.execute(
+                "UPDATE qa_results SET needs_human_review = ? WHERE qa_id = ?",
+                (0 if body.approved else 1, task["qa"]["qa_id"]),
+            )
+        metadata = task["metadata"]
+        metadata.setdefault("reviews", []).append(
+            {"at": utcnow(), "approved": body.approved, "note": body.note}
+        )
+        with transaction(conn):
+            import json as _json
+            conn.execute(
+                "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE task_id = ?",
+                (_json.dumps(metadata, ensure_ascii=False), utcnow(), task_id),
+            )
+        return {"task_id": task_id, "approved": body.approved,
+                "needs_human_review": not body.approved}
 
     # ---------------- batches / stats / export ----------------
 

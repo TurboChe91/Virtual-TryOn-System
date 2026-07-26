@@ -238,7 +238,8 @@ class OpenAICompatProvider(ImageProvider):
         if not url.startswith("https://"):
             raise ProviderError("download_failed", "refusing non-https image url", retryable=False)
         try:
-            with httpx.Client(timeout=self.settings.timeout_s, follow_redirects=True) as client:
+            # No redirects: image URLs are direct object-storage links; redirects widen SSRF surface.
+            with httpx.Client(timeout=self.settings.timeout_s, follow_redirects=False) as client:
                 with client.stream("GET", url) as response:
                     if response.status_code != 200:
                         raise ProviderError(

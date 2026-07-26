@@ -153,6 +153,12 @@ class RetryRequest(BaseModel):
     note: str = Field(default="", max_length=200)
 
 
+class ReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    approved: bool = Field(..., description="true clears needs_human_review on the latest QA result")
+    note: str = Field(default="", max_length=300)
+
+
 class ExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     skus: list[str] = Field(default_factory=list, description="empty = all exportable styles")

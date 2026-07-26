@@ -15,7 +15,7 @@ docker compose up -d
 docker build -t lunelle-studio .
 docker volume create lunelle-data
 docker run -d --name lunelle-studio --restart unless-stopped --env-file .env \
-  -e LUNELLE_DATA_DIR=/data -e LUNELLE_HOST=0.0.0.0 \
+  -e LUNELLE_DATA_DIR=/data -e LUNELLE_HOST=0.0.0.0 -e LUNELLE_ENV=production \
   -v lunelle-data:/data -p 127.0.0.1:8300:8300 lunelle-studio
 ```
 

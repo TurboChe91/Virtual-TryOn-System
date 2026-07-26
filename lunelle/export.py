@@ -17,6 +17,7 @@ import csv
 import hashlib
 import json
 import logging
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -46,6 +47,19 @@ REPORT_CSV_COLUMNS = [
 
 class ExportError(Exception):
     pass
+
+
+def _claim_export_dir(base: Path, stamp: str) -> Path:
+    """Atomically reserve a unique export directory name."""
+    base.mkdir(parents=True, exist_ok=True)
+    for suffix in [""] + [f"-{n}" for n in range(2, 100)]:
+        candidate = base / f"export-{stamp}{suffix}"
+        try:
+            candidate.mkdir(parents=False, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise ExportError("could not allocate a unique export directory")
 
 
 def _latest_success(conn, style_id: str, output_type: str) -> dict | None:
@@ -91,8 +105,14 @@ def run_export(
         styles = conn.execute("SELECT * FROM styles ORDER BY sku").fetchall()
 
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    export_dir = config.export_dir / f"export-{stamp}"
-    images_dir = export_dir / "images"
+    # Claim a unique final name up front (guards concurrent exports), then
+    # build everything in a staging dir and publish with one atomic rename.
+    export_dir = _claim_export_dir(config.export_dir, stamp)
+    staging_dir = export_dir.with_name(export_dir.name + ".partial")
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+    images_dir = staging_dir / "images"
 
     items: list[dict] = []
     report_rows: list[dict] = []
@@ -161,11 +181,11 @@ def run_export(
         items.append(entry)
 
     if not items:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        export_dir.rmdir()
         raise ExportError(
             "no styles have both a successful grid and wearing image to export"
         )
-
-    export_dir.mkdir(parents=True, exist_ok=True)
 
     manifest = {
         "export_id": f"export-{stamp}",
@@ -175,11 +195,11 @@ def run_export(
         "naming_rule": "images/nail-style-<sku>-<output_type>.webp",
         "items": items,
     }
-    (export_dir / "manifest.json").write_text(
+    (staging_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    with open(export_dir / "products.csv", "w", newline="", encoding="utf-8") as fh:
+    with open(staging_dir / "products.csv", "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=PRODUCT_CSV_COLUMNS)
         writer.writeheader()
         for entry in items:
@@ -206,13 +226,16 @@ def run_export(
                 row["Image Alt Text"] = f"{entry['name']} - {output_type}"
                 writer.writerow({col: row.get(col, "") for col in PRODUCT_CSV_COLUMNS})
 
-    with open(export_dir / "generation-report.csv", "w", newline="", encoding="utf-8") as fh:
+    with open(staging_dir / "generation-report.csv", "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=REPORT_CSV_COLUMNS)
         writer.writeheader()
         for row in report_rows:
             writer.writerow({col: ("" if row.get(col) is None else row.get(col))
                              for col in REPORT_CSV_COLUMNS})
 
+    # Publish atomically: replace the claimed placeholder with the finished tree.
+    export_dir.rmdir()
+    staging_dir.rename(export_dir)
     logger.info("export complete: %s (%d styles, %d skipped)",
                 export_dir.name, len(items), len(skipped))
     return {"export_dir": str(export_dir), **manifest}

@@ -84,6 +84,11 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
             continue
         try:
             with transaction(conn):
+                raced = conn.execute(
+                    "SELECT 1 FROM schema_migrations WHERE number = ?", (number,)
+                ).fetchone()
+                if raced is not None:  # another process applied it first
+                    continue
                 for statement in _split_statements(sql):
                     conn.execute(statement)
                 conn.execute(

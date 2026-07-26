@@ -6,10 +6,16 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # Container-internal paths/binding always win over .env values.
+      # Container-internal invariants always win over .env values.
       LUNELLE_DATA_DIR: /data
       LUNELLE_HOST: 0.0.0.0
       LUNELLE_PORT: "8300"
+      LUNELLE_ENV: production
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     ports:
       # Bind to localhost only; put a reverse proxy in front for public access.
       - "127.0.0.1:8300:8300"

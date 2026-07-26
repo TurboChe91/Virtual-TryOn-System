@@ -124,7 +124,7 @@ docker compose logs -f lunelle
 ```bash
 docker build -t lunelle-studio .
 docker run -d --name lunelle-studio --env-file .env \
-  -e LUNELLE_DATA_DIR=/data -e LUNELLE_HOST=0.0.0.0 \
+  -e LUNELLE_DATA_DIR=/data -e LUNELLE_HOST=0.0.0.0 -e LUNELLE_ENV=production \
   -v lunelle-data:/data -p 127.0.0.1:8300:8300 lunelle-studio
 ```
 
@@ -213,7 +213,9 @@ git pull && ./scripts/setup.sh && 重启服务      # 迁移自动应用
 ## 21. 已知限制
 
 - QA 无法自动识别水印文字/手部畸形/款式还原度 —— 这些列入 `manual_review_items`，
-  自动化只做硬性检查并标记人工复核（`needs_human_review` 恒为 true）
+  自动化只做硬性检查并默认标记待人工复核；复核通过用管理页按钮或
+  `POST /api/tasks/{id}/review {"approved":true}` 记录，导出时可用
+  `include_unreviewed=false` 只导出已复核资产
 - 甲型/长度对生成模型是软约束，可能漂移（两图之间一致性由参考图机制保证）
 - 成本为估算值（OpenAI 兼容图片接口不回报实际扣费），单价可用 `LUNELLE_PRICING_JSON` 校准
 - SQLite 单机部署；多实例共享数据库不受支持（WAL 支持同机多进程，已验证）
