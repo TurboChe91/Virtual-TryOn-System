@@ -1,0 +1,31 @@
+# Secrets / local config — never commit
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data (persisted outside the repo in production)
+data/
+logs/
+outputs/
+uploads/
+exports/
+backups/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Temp
+tmp/
+*.tmp

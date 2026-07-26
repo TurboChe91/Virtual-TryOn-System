@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lunelle Studio</title>
+<style>
+  :root { --bg:#faf7f2; --card:#fff; --line:#e8e2d8; --ink:#2b2620; --sub:#8a8074;
+          --accent:#b07d62; --ok:#3d7a4f; --bad:#b03a3a; --warn:#a1770a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { display:flex; align-items:center; gap:16px; padding:14px 24px; background:var(--card);
+           border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  header h1 { font-size:17px; margin:0; letter-spacing:.5px; }
+  header .sub { color:var(--sub); font-size:12px; }
+  header input { margin-left:auto; width:210px; }
+  main { max-width:1200px; margin:0 auto; padding:20px 24px 60px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px;
+            padding:18px 20px; margin-bottom:18px; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  label { display:block; font-size:12px; color:var(--sub); margin:8px 0 2px; }
+  input, textarea, select { width:100%; padding:7px 9px; border:1px solid var(--line);
+    border-radius:6px; font:inherit; background:#fff; }
+  textarea { resize:vertical; min-height:56px; }
+  .row { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; }
+  button { padding:7px 14px; border:1px solid var(--accent); background:var(--accent); color:#fff;
+           border-radius:6px; cursor:pointer; font:inherit; }
+  button.ghost { background:#fff; color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--sub); font-weight:500; font-size:12px; }
+  .pill { display:inline-block; padding:1px 9px; border-radius:20px; font-size:12px; color:#fff; }
+  .pill.success{background:var(--ok)} .pill.failed{background:var(--bad)}
+  .pill.running{background:#3d6ea5} .pill.pending{background:#9a938a}
+  .pill.retrying{background:var(--warn)} .pill.cancelled{background:#6b6156}
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-bottom:12px; }
+  .card { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .card b { display:block; font-size:20px; }
+  .card span { color:var(--sub); font-size:12px; }
+  #detail { position:fixed; inset:0; background:rgba(40,33,26,.45); display:none;
+            align-items:flex-start; justify-content:center; padding:40px 16px; overflow:auto; z-index:10; }
+  #detail .box { background:#fff; border-radius:12px; max-width:860px; width:100%; padding:22px 26px; }
+  pre { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px;
+        white-space:pre-wrap; word-break:break-word; font-size:12px; max-height:260px; overflow:auto; }
+  img.preview { max-width:100%; border:1px solid var(--line); border-radius:8px; }
+  .muted { color:var(--sub); }
+  .flex { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--ink);
+           color:#fff; padding:9px 18px; border-radius:8px; display:none; z-index:20; max-width:80%; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lunelle Studio</h1>
+  <span class="sub">AI 穿戴甲视觉资产生产</span>
+  <input id="adminToken" type="password" placeholder="X-Admin-Token（未设置可留空）">
+</header>
+<main>
+  <section>
+    <h2>新建款式</h2>
+    <div class="row">
+      <div><label>款式名称</label><input id="f_name" placeholder="Pearl French"></div>
+      <div><label>SKU（留空自动生成）</label><input id="f_sku" placeholder="nail-pearl-french"></div>
+      <div><label>甲型</label><select id="f_shape"><option value="">自动识别</option>
+        <option>almond</option><option>coffin</option><option>square</option>
+        <option>tapered-square</option><option>squoval</option><option>oval</option>
+        <option>round</option><option>stiletto</option></select></div>
+      <div><label>长度</label><select id="f_length"><option value="">自动识别</option>
+        <option>short</option><option>medium</option><option>long</option><option>extra-long</option></select></div>
+      <div><label>肤色（佩戴图）</label><select id="f_skin"><option value="">light</option>
+        <option>light</option><option>medium</option><option>tan</option><option>deep</option></select></div>
+    </div>
+    <label>自然语言描述</label>
+    <textarea id="f_desc" placeholder="milky white almond nails with pearl accents, thin gold lines and a french tip, glossy finish"></textarea>
+    <div class="row">
+      <div><label>主色（逗号分隔）</label><input id="f_colors" placeholder="milky white, soft pink"></div>
+      <div><label>元素（逗号分隔）</label><input id="f_elements" placeholder="pearl, gold line, french tip"></div>
+      <div><label>质感（逗号分隔）</label><input id="f_texture" placeholder="glossy, translucent"></div>
+      <div><label>避免元素（逗号分隔）</label><input id="f_avoid" placeholder="cartoon style, oversized decoration"></div>
+    </div>
+    <div class="flex" style="margin-top:12px">
+      <button onclick="createStyle(false)">创建款式</button>
+      <button class="ghost" onclick="createStyle(true)">创建并生成两图</button>
+      <span class="muted" id="createMsg"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>统计</h2>
+    <div class="cards" id="statCards"></div>
+    <div id="skuStats" class="muted"></div>
+  </section>
+
+  <section>
+    <h2>款式列表</h2>
+    <table id="stylesTable"><thead><tr>
+      <th>SKU</th><th>名称</th><th>甲型/长度</th><th>主色</th><th>创建时间</th><th></th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>任务</h2>
+    <div class="flex" style="margin-bottom:10px">
+      <select id="q_status" style="width:130px"><option value="">全部状态</option>
+        <option>pending</option><option>running</option><option>success</option>
+        <option>failed</option><option>retrying</option><option>cancelled</option></select>
+      <select id="q_type" style="width:130px"><option value="">全部类型</option>
+        <option>grid</option><option>wearing</option></select>
+      <input id="q_sku" placeholder="按 SKU 筛选" style="width:180px">
+      <button class="ghost" onclick="loadTasks()">刷新</button>
+      <button class="ghost" onclick="doExport()">导出 Shopify 素材</button>
+    </div>
+    <table id="tasksTable"><thead><tr>
+      <th>任务</th><th>SKU</th><th>类型</th><th>状态</th><th>重试</th><th>模型</th>
+      <th>创建时间</th><th>错误</th><th></th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+</main>
+
+<div id="detail" onclick="if(event.target===this)this.style.display='none'">
+  <div class="box" id="detailBox"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const token = () => $('#adminToken').value.trim();
+$('#adminToken').value = localStorage.getItem('lunelle_token') || '';
+$('#adminToken').addEventListener('change', () => localStorage.setItem('lunelle_token', token()));
+
+function toast(msg, ms=3500){ const t=$('#toast'); t.textContent=msg; t.style.display='block';
+  clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none', ms); }
+
+async function api(path, opts={}) {
+  opts.headers = Object.assign({'Content-Type':'application/json'}, opts.headers||{});
+  if (token()) opts.headers['X-Admin-Token'] = token();
+  const res = await fetch(path, opts);
+  let body = null;
+  try { body = await res.json(); } catch(e) {}
+  if (!res.ok) throw new Error((body && (body.error||body.detail)) || ('HTTP '+res.status));
+  return body;
+}
+const csv = v => v.split(',').map(s=>s.trim()).filter(Boolean);
+
+async function createStyle(alsoGenerate){
+  $('#createMsg').textContent = '';
+  const body = {
+    name: $('#f_name').value.trim() || null,
+    sku: $('#f_sku').value.trim() || null,
+    description: $('#f_desc').value.trim(),
+    base_colors: csv($('#f_colors').value),
+    elements: csv($('#f_elements').value),
+    texture: csv($('#f_texture').value),
+    avoid: csv($('#f_avoid').value),
+    shape: $('#f_shape').value || null,
+    length: $('#f_length').value || null,
+    skin_tone: $('#f_skin').value || null,
+  };
+  try {
+    const out = await api('/api/styles', {method:'POST', body: JSON.stringify(body)});
+    let msg = '款式已创建: ' + out.style.sku;
+    if (out.warnings && out.warnings.length) msg += '（' + out.warnings.join('；') + '）';
+    if (alsoGenerate) {
+      const gen = await api(`/api/styles/${out.style.style_id}/generate`,
+        {method:'POST', body: JSON.stringify({output_types:['grid','wearing']})});
+      msg += ' | 已创建 ' + gen.created.length + ' 个生成任务';
+    }
+    $('#createMsg').textContent = msg;
+    toast(msg); refreshAll();
+  } catch(e){ toast('创建失败: ' + e.message, 6000); }
+}
+
+async function generateFor(styleId, force){
+  try {
+    const gen = await api(`/api/styles/${styleId}/generate`,
+      {method:'POST', body: JSON.stringify({output_types:['grid','wearing'], force: !!force})});
+    toast(`批次 ${gen.batch_id}: 新建 ${gen.created.length}，复用 ${gen.reused.length}，跳过 ${gen.skipped.length}`);
+    loadTasks();
+  } catch(e){ toast('生成失败: ' + e.message, 6000); }
+}
+
+async function loadStyles(){
+  const out = await api('/api/styles');
+  $('#stylesTable tbody').innerHTML = out.styles.map(s => {
+    const spec = s.spec || {};
+    return `<tr>
+      <td>${esc(s.sku)}</td><td>${esc(s.name)}</td>
+      <td>${esc(spec.shape)}/${esc(spec.length)}</td>
+      <td>${esc((spec.base_colors||[]).join(', '))}</td>
+      <td class="muted">${esc(s.created_at)}</td>
+      <td class="flex">
+        <button class="ghost" onclick="generateFor('${s.style_id}',false)">生成</button>
+        <button class="ghost" onclick="generateFor('${s.style_id}',true)">强制新版本</button>
+      </td></tr>`;
+  }).join('') || '<tr><td colspan="6" class="muted">暂无款式</td></tr>';
+}
+
+async function loadTasks(){
+  const p = new URLSearchParams();
+  if ($('#q_status').value) p.set('status', $('#q_status').value);
+  if ($('#q_type').value) p.set('output_type', $('#q_type').value);
+  if ($('#q_sku').value.trim()) p.set('sku', $('#q_sku').value.trim());
+  const out = await api('/api/tasks?' + p);
+  $('#tasksTable tbody').innerHTML = out.tasks.map(t => `<tr>
+    <td><a href="#" onclick="showTask('${t.task_id}');return false">${esc(t.task_id)}</a></td>
+    <td>${esc(t.sku)}</td><td>${esc(t.output_type)}</td>
+    <td><span class="pill ${esc(t.status)}">${esc(t.status)}</span></td>
+    <td>${t.retry_count}/${t.max_retries}</td>
+    <td class="muted">${esc(t.model)}</td>
+    <td class="muted">${esc(t.created_at)}</td>
+    <td class="muted">${esc(t.error_code||'')}</td>
+    <td>${t.status==='failed'||t.status==='cancelled'
+        ? `<button class="ghost" onclick="retryTask('${t.task_id}')">重试</button>` : ''}</td>
+  </tr>`).join('') || '<tr><td colspan="9" class="muted">暂无任务</td></tr>';
+}
+
+async function retryTask(id){
+  try { await api(`/api/tasks/${id}/retry`, {method:'POST', body:'{}'}); toast('已重新入队'); loadTasks(); }
+  catch(e){ toast('重试失败: ' + e.message, 6000); }
+}
+
+async function showTask(id){
+  try {
+    const t = await api('/api/tasks/' + id);
+    const qa = t.qa ? `<h3>QA（score ${t.qa.score}, ${t.qa.passed?'通过':'未通过'}，需人工复核）</h3>
+      <pre>${esc(JSON.stringify(t.qa.issues.length?t.qa.issues:t.qa.checks, null, 2))}</pre>` : '';
+    const img = t.status==='success' ? `<img class="preview" src="/api/tasks/${id}/image">` : '';
+    const attempts = (t.attempts||[]).map(a =>
+      `<tr><td>#${a.attempt_no}</td><td>${esc(a.outcome)}</td><td>${a.duration_ms??''}ms</td>
+       <td>${esc(a.external_request_id||'')}</td><td>${esc(a.error_code||'')}</td></tr>`).join('');
+    $('#detailBox').innerHTML = `
+      <div class="flex"><h2 style="margin:0">${esc(t.task_id)}</h2>
+        <span class="pill ${esc(t.status)}">${esc(t.status)}</span>
+        <span class="muted">${esc(t.sku)} · ${esc(t.output_type)} · ${esc(t.model)}</span></div>
+      ${t.error_message?`<p style="color:var(--bad)">${esc(t.error_code)}: ${esc(t.error_message)}</p>`:''}
+      ${img}
+      <h3>Prompt（${esc(t.prompt_version)}）</h3><pre>${esc(t.prompt)}</pre>
+      <h3>Negative prompt</h3><pre>${esc(t.negative_prompt)}</pre>
+      <h3>调用记录</h3>
+      <table><thead><tr><th>#</th><th>结果</th><th>耗时</th><th>请求ID</th><th>错误</th></tr></thead>
+      <tbody>${attempts||'<tr><td colspan=5 class=muted>无</td></tr>'}</tbody></table>
+      ${qa}`;
+    $('#detail').style.display = 'flex';
+  } catch(e){ toast(e.message, 5000); }
+}
+
+async function loadStats(){
+  const s = await api('/api/stats');
+  const t = s.tasks;
+  const cost = (s.cost_usd.actual_recorded + s.cost_usd.estimated_for_success_without_actual).toFixed(2);
+  $('#statCards').innerHTML = [
+    ['总任务', t.total], ['成功', t.success], ['失败', t.failed],
+    ['进行中', t.running + t.pending + t.retrying],
+    ['成功率', t.success_rate==null?'—':(t.success_rate*100).toFixed(1)+'%'],
+    ['重试次数', t.total_retries], ['成本(USD)', '≈'+cost],
+  ].map(([k,v])=>`<div class="card"><b>${v}</b><span>${k}</span></div>`).join('');
+  const done = s.per_sku.filter(r=>r.complete).length;
+  $('#skuStats').textContent = `SKU 完成情况: ${done}/${s.per_sku.length} 个款式已有两类成品图`
+    + (s.failure_reasons.length ? ' | 失败原因: ' + s.failure_reasons.map(r=>`${r.error_code}×${r.n}`).join('，') : '');
+}
+
+async function doExport(){
+  try {
+    const out = await api('/api/export', {method:'POST', body: JSON.stringify({})});
+    toast(`导出完成: ${out.item_count} 个款式 → ${out.export_dir}`, 8000);
+  } catch(e){ toast('导出失败: ' + e.message, 6000); }
+}
+
+function refreshAll(){ loadStyles(); loadTasks(); loadStats(); }
+refreshAll();
+setInterval(()=>{ loadTasks(); loadStats(); }, 5000);
+</script>
+</body>
+</html>

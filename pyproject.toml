@@ -1,0 +1,27 @@
+[project]
+name = "lunelle-studio"
+version = "1.0.0"
+description = "Production system for AI-generated press-on nail visual assets (Shopify)"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = [
+  "S101",  # assert in tests
+  "S603", "S607",  # subprocess in scripts/tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S108"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+  "real_api: tests that call the real paid image API (opt-in via RUN_REAL_E2E=1)",
+]
