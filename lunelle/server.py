@@ -172,7 +172,7 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
     @app.post("/api/styles/{style_id}/reference-image",
               dependencies=[Depends(require_admin)])
     async def upload_reference(style_id: str, request: Request,
-                               file: UploadFile = File(...)):
+                               file: UploadFile = File(...)):  # noqa: B008 - FastAPI dependency idiom
         service: TaskService = request.app.state.service
         service.get_style(style_id)  # 404 if missing
 

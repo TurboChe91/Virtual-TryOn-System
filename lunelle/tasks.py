@@ -39,12 +39,7 @@ from .schemas import StyleSpec
 logger = logging.getLogger(__name__)
 
 
-class NotFoundError(Exception):
-    pass
-
-
-class ConflictError(Exception):
-    pass
+from .errors import ConflictError, NotFoundError  # noqa: E402  (re-export for callers)
 
 
 @dataclass
@@ -314,10 +309,10 @@ class TaskService:
             params.append(batch_id)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = self.db.conn().execute(
-            f"SELECT task_id, batch_id, style_id, sku, output_type, prompt_version, provider,"
+            f"SELECT task_id, batch_id, style_id, sku, output_type, prompt_version, provider,"  # noqa: S608
             f" model, status, retry_count, max_retries, estimated_cost_usd, actual_cost_usd,"
             f" created_at, started_at, completed_at, updated_at, output_path, error_code"
-            f" FROM tasks {where} ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",
+            f" FROM tasks {where} ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",  # noqa: S608
             (*params, limit, offset),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -347,8 +342,9 @@ class TaskService:
             sets.append(f"{column} = ?")
             params.append(value)
         params.extend([task_id, current])
-        cur = conn.execute(
-            f"UPDATE tasks SET {', '.join(sets)} WHERE task_id = ? AND status = ?", params
+        cur = conn.execute(  # noqa: S608 - column names are internal constants, values bound
+            f"UPDATE tasks SET {', '.join(sets)} WHERE task_id = ? AND status = ?",  # noqa: S608
+            params,
         )
         if cur.rowcount != 1:
             raise IllegalTransition(current, new)

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from . import vocab
+from .errors import ConflictError
 from .schemas import SKU_RE, StyleCreateRequest, StyleSpec
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ def derive_sku(request: StyleCreateRequest, taken: set[str]) -> str:
                 "sku must be 2-48 chars of lowercase letters, digits and hyphens"
             )
         if sku in taken:
-            raise StyleInputError(f"sku {sku!r} already exists")
+            raise ConflictError(f"sku {sku!r} already exists")
         return sku
     base = slugify(request.name or "") or "nail-style"
     if not base.startswith("nail"):
@@ -178,7 +179,8 @@ Output ONLY a JSON object with these keys:
   base_colors (array of 1-4 short color strings),
   accent_colors (array of 0-4 strings),
   elements (array of 0-10 short motif/decoration strings, e.g. "french tip", "pearl", "gold line"),
-  texture (array of 0-5 of: glossy, matte, jelly, chrome, glitter, translucent, milky, pearl, cat-eye, velvet, marble, magnetic),
+  texture (array of 0-5 of: glossy, matte, jelly, chrome, glitter, translucent, milky,
+           pearl, cat-eye, velvet, marble, magnetic),
   shape (one of: almond, coffin, square, tapered-square, squoval, oval, round, stiletto),
   length (one of: short, medium, long, extra-long),
   visual_style (short string),
@@ -216,7 +218,9 @@ def parse_with_llm(
         "texture": request.texture or doc.get("texture") or [],
         "shape": (request.shape or doc.get("shape") or vocab.DEFAULT_SHAPE),
         "length": (request.length or doc.get("length") or vocab.DEFAULT_LENGTH),
-        "visual_style": request.visual_style or doc.get("visual_style") or vocab.DEFAULT_VISUAL_STYLE,
+        "visual_style": (
+            request.visual_style or doc.get("visual_style") or vocab.DEFAULT_VISUAL_STYLE
+        ),
         "avoid": request.avoid or doc.get("avoid") or [],
         "skin_tone": request.skin_tone or doc.get("skin_tone") or vocab.DEFAULT_SKIN_TONE,
         "notes": request.notes,

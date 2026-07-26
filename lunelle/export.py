@@ -80,7 +80,8 @@ def run_export(
     if skus:
         placeholders = ",".join("?" for _ in skus)
         styles = conn.execute(
-            f"SELECT * FROM styles WHERE sku IN ({placeholders}) ORDER BY sku", skus
+            f"SELECT * FROM styles WHERE sku IN ({placeholders}) ORDER BY sku",  # noqa: S608
+            skus,
         ).fetchall()
         found = {row["sku"] for row in styles}
         missing = [s for s in skus if s not in found]

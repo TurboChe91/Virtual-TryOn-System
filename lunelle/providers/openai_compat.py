@@ -17,7 +17,6 @@ import base64
 import json
 import logging
 import mimetypes
-import uuid
 from dataclasses import dataclass
 
 import httpx
