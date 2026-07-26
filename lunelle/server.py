@@ -9,7 +9,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from PIL import Image, UnidentifiedImageError
 
@@ -355,6 +355,35 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
     @app.post("/api/tasks/{task_id}/retry", dependencies=[Depends(require_admin)])
     def retry_task(task_id: str, body: RetryRequest, request: Request):
         return request.app.state.service.manual_retry(task_id, note=body.note)
+
+    @app.post("/api/tasks/{task_id}/correct", status_code=202,
+              dependencies=[Depends(require_admin)])
+    async def correct_task(task_id: str, request: Request,
+                           correction: str = Form(..., min_length=4, max_length=2000),
+                           owner_override: str = Form(""),
+                           file: UploadFile | None = File(None)):  # noqa: B008 - FastAPI idiom
+        """SOP v2+: locked-base local edit with an explicit correction; optional
+        single-nail detail reference attached as the final image."""
+        service: TaskService = request.app.state.service
+        details: list[Path] = []
+        if file is not None and file.filename:
+            data = await file.read(config.max_upload_mb * 1024 * 1024 + 1)
+            _fmt, ext = _validated_upload(data)
+            source = service.get_task(task_id, with_details=False)
+            digest = hashlib.sha256(data).hexdigest()[:12]
+            dest = config.upload_dir / source["style_id"] / f"detail-{digest}{ext}"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            details.append(dest)
+        try:
+            task = service.create_correction(
+                task_id, correction_text=correction,
+                detail_references=details, owner_override=owner_override,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"task_id": task["task_id"], "version": task["metadata"]["version"],
+                "corrects": task_id}
 
     @app.post("/api/tasks/{task_id}/cancel", dependencies=[Depends(require_admin)])
     def cancel_task(task_id: str, request: Request):

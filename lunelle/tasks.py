@@ -36,6 +36,7 @@ from .models import (
 )
 from .prompts import (
     PromptBundle,
+    build_correction_prompt,
     build_prompt_bundle,
     prompt_for_output_type,
     prompt_version_for,
@@ -46,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 
 from .errors import ConflictError, NotFoundError  # noqa: E402  (re-export for callers)
+
+CORRECTION_BUDGET = 5  # authorized versions per style+output_type (v1..v5), per SOP
 
 
 @dataclass
@@ -312,6 +315,82 @@ class TaskService:
         )
         return GenerationPlan(batch_id=batch_id, created=created, reused=reused, skipped=skipped)
 
+    def create_correction(
+        self,
+        task_id: str,
+        *,
+        correction_text: str,
+        detail_references: list[Path] | None = None,
+        owner_override: str = "",
+    ) -> dict:
+        """v2+ per SOP: a locked-base local edit of a successful candidate."""
+        source = self.get_task(task_id, with_details=False)
+        if source["status"] != SUCCESS or not source.get("output_path"):
+            raise ConflictError("corrections start from a successful candidate with an image")
+        if not correction_text.strip():
+            raise ValueError("correction text is required — it is the only allowed change")
+        details = [path for path in (detail_references or []) if path.is_file()]
+
+        version = int(source["metadata"].get("version", 1)) + 1
+        chain = self.db.conn().execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE style_id = ? AND output_type = ?",
+            (source["style_id"], source["output_type"]),
+        ).fetchone()["n"]
+        if chain >= CORRECTION_BUDGET and not owner_override:
+            raise ConflictError(
+                f"attempt budget exhausted ({chain}/{CORRECTION_BUDGET} versions for this "
+                f"style+type); per SOP this style is BLOCKED pending owner review. "
+                f"Pass owner_override to continue."
+            )
+
+        provider_name, model, price, profile_name = self._generation_channel()
+        prompt = build_correction_prompt(source["prompt"], correction_text, len(details))
+        conn = self.db.conn()
+        batch_id = new_batch_id()
+        now = utcnow()
+        new_id_ = new_task_id()
+        metadata = {
+            "correction_of": task_id,
+            "version": version,
+            "correction_text": correction_text.strip()[:2000],
+            "correction_details": [str(path) for path in details],
+        }
+        if profile_name:
+            metadata["api_profile"] = profile_name
+        if owner_override:
+            metadata["owner_override"] = owner_override
+        for key in ("use_reference", "use_style_reference", "style_reference_path",
+                    "use_hero_reference"):
+            if source["metadata"].get(key):
+                metadata[key] = source["metadata"][key]
+        with transaction(conn):
+            conn.execute(
+                "INSERT INTO batches (batch_id, note, created_at) VALUES (?,?,?)",
+                (batch_id, f"correction v{version} of {task_id}", now),
+            )
+            conn.execute(
+                "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
+                " negative_prompt, prompt_version, provider, model, status, retry_count,"
+                " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
+                " created_at, updated_at, metadata_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    new_id_, batch_id, source["style_id"], source["sku"],
+                    source["output_type"], prompt, source["negative_prompt"],
+                    source["prompt_version"], provider_name, model, PENDING, 0,
+                    self.config.max_retries, price,
+                    self.idempotency_key(source["style_id"], source["output_type"],
+                                         source["prompt_version"], prompt, batch_id),
+                    None, now, now, json.dumps(metadata, ensure_ascii=False),
+                ),
+            )
+        logger.info(
+            "correction planned",
+            extra={"ctx": {"task_id": new_id_, "stage": "correction",
+                            "style_id": source["style_id"], "status": f"v{version}"}},
+        )
+        return self.get_task(new_id_, with_details=False)
+
     # ---------------- task queries ----------------
 
     def get_task(self, task_id: str, *, with_details: bool = True) -> dict:
@@ -536,6 +615,18 @@ class TaskService:
             error_code=error_code,
             error_message=safe_message,
         )
+
+    def stamp_metadata(self, task_id: str, extra: dict) -> None:
+        """Merge keys into a task's metadata_json (no status transition)."""
+        task = self.get_task(task_id, with_details=False)
+        metadata = task["metadata"]
+        metadata.update(extra)
+        conn = self.db.conn()
+        with transaction(conn):
+            conn.execute(
+                "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE task_id = ?",
+                (json.dumps(metadata, ensure_ascii=False), utcnow(), task_id),
+            )
 
     # ---------------- manual operations ----------------
 

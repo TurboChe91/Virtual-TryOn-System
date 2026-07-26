@@ -214,6 +214,30 @@ Hard constraints:
 - No text, labels, boxes, grid lines, logos, or watermarks in the output."""
 
 
+# ---- correction (v2+ = locked-base local edit, never a free re-roll) --------
+#
+# Protocol proven on style-wechat-35-9 (PASS in 3 versions): narrow the scope
+# explicitly, attach the previous candidate as a must-preserve edit base,
+# optionally attach single-nail detail references, and let the correction text
+# carry set-wide COUNT LOCKS ("exactly two gothic opals in the whole image") —
+# count locks are what stop collateral damage on untouched nails.
+
+def build_correction_prompt(base_prompt: str, correction_text: str, detail_count: int) -> str:
+    detail_note = (
+        f" After it come {detail_count} enlarged single-nail detail reference(s); "
+        "use each ONLY for its explicitly named correction slot."
+        if detail_count else ""
+    )
+    header = f"""HIGHEST-PRIORITY ATTEMPT CORRECTION — this is a LOCAL EDIT, not a new generation:
+{correction_text.strip()}
+
+EDIT BASE: the image attached after the authority image(s) is the PREVIOUS CANDIDATE. It is the edit base that must be preserved: keep its photography, lighting, hands, and every nail that the correction does not explicitly name, pixel-faithful.{detail_note}
+Apply ONLY the correction above. Do not re-style, re-pose, re-light, or improve anything else.
+
+"""
+    return header + base_prompt
+
+
 def build_negative_prompt(spec: StyleSpec) -> str:
     if spec.avoid:
         return BASE_NEGATIVE + ", " + ", ".join(item.lower() for item in spec.avoid)

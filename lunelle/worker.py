@@ -118,6 +118,24 @@ class Worker:
             model=task["model"],
         )
         references = self._resolve_references(task, log)
+        if task["metadata"].get("correction_of"):
+            # SOP v2+: previous candidate rides after the authority images as the
+            # locked edit base, then any single-nail detail references.
+            try:
+                source = self.service.get_task(task["metadata"]["correction_of"],
+                                               with_details=False)
+                previous = Path(source.get("output_path") or "")
+                if previous.is_file():
+                    references.append(previous)
+                else:
+                    log.warning("correction base image missing on disk",
+                                ctx={"stage": "reference"})
+            except Exception:  # noqa: BLE001 - degraded correction beats a crash
+                log.warning("correction source task unavailable", ctx={"stage": "reference"})
+            for detail in task["metadata"].get("correction_details", []):
+                detail_path = Path(detail)
+                if detail_path.is_file():
+                    references.append(detail_path)
         prompt = task["prompt"]
         expected_reference = (
             task["metadata"].get("use_reference")
@@ -234,9 +252,31 @@ class Worker:
                 "qa recorded",
                 ctx={"stage": "qa", "status": "pass" if qa_doc["passed"] else "fail"},
             )
+            if not qa_doc["passed"]:
+                self._maybe_auto_regen(task, qa_doc, log)
         except Exception:  # noqa: BLE001 - QA is advisory
             log.warning("qa run crashed; result not recorded", ctx={"stage": "qa"})
             logger.exception("qa failure detail")
+
+    def _maybe_auto_regen(self, task: dict, qa_doc: dict, log) -> None:
+        """First-shot-or-reroll policy: a hard automatic-QA failure earns one
+        fresh regeneration (bounded by LUNELLE_AUTO_REGEN_MAX, 0 disables)."""
+        depth = int(task["metadata"].get("auto_regen_depth", 0))
+        if depth >= self.config.auto_regen_max:
+            return
+        try:
+            plan = self.service.create_generation(
+                task["style_id"], [task["output_type"]], force=True,
+                note=f"auto-regen after QA fail of {task['task_id']}",
+            )
+            for created in plan.created:
+                self.service.stamp_metadata(created["task_id"],
+                                            {"auto_regen_depth": depth + 1,
+                                             "auto_regen_of": task["task_id"]})
+            log.info("auto-regen queued after QA failure",
+                     ctx={"stage": "qa", "status": f"depth={depth + 1}"})
+        except Exception:  # noqa: BLE001 - auto-regen is best-effort
+            logger.exception("auto-regen scheduling failed")
 
     def _size_for(self, output_type: str) -> tuple[int, int]:
         if output_type == OUTPUT_GRID:

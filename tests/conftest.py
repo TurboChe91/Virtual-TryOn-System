@@ -43,6 +43,7 @@ def make_config(tmp_path: Path, **overrides) -> Config:
         retry_backoff_base_s=1,
         request_timeout_s=30,
         qa_min_side=256,
+        auto_regen_max=0,  # deterministic tests; production defaults to 1
         max_upload_mb=2,
         disable_provider_watermark=True,
         pricing_usd=dict(DEFAULT_PRICING_USD),
