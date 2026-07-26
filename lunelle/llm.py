@@ -151,7 +151,8 @@ AUTO_QA_SYSTEM = (
     "generated image against its design authority and output a strict JSON verdict."
 )
 
-AUTO_QA_USER = """Image 1 is the GENERATED candidate. Image 2 (if present) is the design authority (plan/reference).
+AUTO_QA_USER = """Image 1 is the GENERATED candidate.
+Image 2 (if present) is the design authority (plan/reference).
 Design identity (authoritative when present):
 {identity}
 
