@@ -86,18 +86,26 @@
           border-radius:999px; background:var(--teal-soft); }
   .live::before { content:""; width:7px; height:7px; border-radius:50%;
                   background:var(--teal); }
-  .tones { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:18px; }
-  .tone { border-radius:14px; padding:16px; text-align:center; background:var(--surface);
-          border:1px solid rgba(23,19,19,.06);
-          box-shadow:0 1px 2px rgba(50,42,36,.04), 0 12px 30px -18px rgba(50,42,36,.26); }
-  .tone img { max-width:100%; max-height:145px; border-radius:10px;
-              box-shadow:0 8px 22px -10px rgba(50,42,36,.35); }
-  .tone .empty { color:var(--faint); padding:44px 0; border:1.5px dashed rgba(23,19,19,.18);
-                 border-radius:10px; font-size:13px; background:var(--soft); }
-  .tone .nm { margin-bottom:10px; }
-  .tone .nm b { font-family:var(--display); font-size:17px; font-weight:600; }
-  .tone .nm span { color:var(--faint); font-size:11.5px; margin-left:6px;
-                   font-family:var(--mono); }
+  .hm { display:grid; grid-template-columns:76px repeat(4,1fr); gap:10px;
+        align-items:stretch; }
+  .hm .hd-col { font-size:12px; font-weight:600; color:var(--muted); text-align:center;
+                align-self:end; padding-bottom:4px; }
+  .hm .hd-row { font-family:var(--display); font-size:15px; font-weight:600;
+                display:flex; flex-direction:column; justify-content:center; }
+  .hm .hd-row span { font-family:var(--mono); font-size:10.5px; color:var(--faint);
+                     font-weight:400; }
+  .cell { border-radius:12px; overflow:hidden; background:var(--soft); cursor:pointer;
+          border:1.5px dashed rgba(23,19,19,.16); aspect-ratio:4/3;
+          display:flex; align-items:center; justify-content:center;
+          color:var(--faint); font-size:12px; transition:border-color .15s, color .15s;
+          position:relative; }
+  .cell:hover { border-color:var(--accent); color:var(--accent); }
+  .cell.set { border:1px solid rgba(23,19,19,.08); }
+  .cell img { width:100%; height:100%; object-fit:cover; display:block; }
+  .cell .re { position:absolute; inset:auto 6px 6px auto; background:rgba(36,32,30,.75);
+              color:#fff8ef; font-size:10.5px; padding:2px 9px; border-radius:999px;
+              opacity:0; transition:opacity .15s; }
+  .cell:hover .re { opacity:1; }
   #toast { position:fixed; bottom:30px; left:50%; transform:translateX(-50%);
            background:var(--dark); color:#fff8ef; padding:12px 28px;
            border-radius:999px; display:none; z-index:30; max-width:76%;
@@ -186,8 +194,8 @@
 
   <div class="panel">
     <div class="hd"><h2>手模底图</h2>
-      <p class="desc">佩戴图与试戴矩阵的姿势与肤色基准，四种肤色各一张；建议同一手模、同一机位。</p></div>
-    <div class="bd"><div class="tones" id="tones"></div></div>
+      <p class="desc">试戴矩阵的姿势与肤色权威，固定 4 肤色 × 4 视角共 16 张；点击任意格上传或替换。建议同一手模、同一机位分别拍四个视角。</p></div>
+    <div class="bd"><div class="hm" id="hm"></div></div>
   </div>
 </div>
 <div id="toast"></div>
@@ -286,30 +294,34 @@ async function deactivate(kind){
 }
 
 const TONES = [['light','浅肤'],['medium','中肤'],['tan','小麦'],['deep','深肤']];
+const VIEWS = [['p2_open_hands','双手展开'],['p3_right_hand','右手'],
+               ['p4_thumb_visible','双手拇指'],['p5_left_hand','左手']];
 const tonePicker = document.createElement('input');
 tonePicker.type = 'file'; tonePicker.accept = 'image/png,image/jpeg,image/webp';
 tonePicker.style.display = 'none'; document.body.appendChild(tonePicker);
 async function loadTones(){
   const out = await api('/api/settings/hand-models');
-  $('#tones').innerHTML = TONES.map(([tone, label]) => {
-    const configured = out.hand_models[tone] && out.hand_models[tone].configured;
-    return `<div class="tone">
-      <div class="nm"><b>${label}</b><span>${tone}</span></div>
-      ${configured
-        ? `<img src="/api/settings/hand-models/${tone}/image?t=${Date.now()}">`
-        : '<div class="empty">未配置</div>'}
-      <div style="margin-top:10px">
-        <button class="sm quiet" onclick="uploadTone('${tone}')">${configured?'替换':'上传'}</button>
-      </div></div>`;
-  }).join('');
+  let cells = '<div></div>' + VIEWS.map(([,vl]) => `<div class="hd-col">${vl}</div>`).join('');
+  for (const [tone, tl] of TONES){
+    cells += `<div class="hd-row">${tl}<span>${tone}</span></div>`;
+    for (const [view] of VIEWS){
+      const ok = out.hand_models[tone] && out.hand_models[tone][view]
+                 && out.hand_models[tone][view].configured;
+      cells += `<div class="cell ${ok?'set':''}" onclick="uploadCell('${tone}','${view}')">
+        ${ok ? `<img loading="lazy" src="/api/settings/hand-models/${tone}/${view}/image?t=${Date.now()}"><span class="re">替换</span>`
+             : '上传'}</div>`;
+    }
+  }
+  $('#hm').innerHTML = cells;
 }
-function uploadTone(tone){
+function uploadCell(tone, view){
   tonePicker.onchange = async () => {
     if (!tonePicker.files.length) return;
     const fd = new FormData(); fd.append('file', tonePicker.files[0]);
     const headers = token() ? {'X-Admin-Token': token()} : {};
     try {
-      const res = await fetch(`/api/settings/hand-models/${tone}`, {method:'POST', body: fd, headers});
+      const res = await fetch(`/api/settings/hand-models/${tone}/${view}`,
+        {method:'POST', body: fd, headers});
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || body.detail || ('HTTP '+res.status));
       toast('已保存'); loadTones();

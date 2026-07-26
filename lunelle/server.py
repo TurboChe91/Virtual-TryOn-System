@@ -525,33 +525,42 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         return {"ok": True, "http_status": 200, "models_listed": len(ids),
                 "configured_model_present": model_present}
 
-    # ---------------- hand models (per skin tone) ----------------
+    # ---------------- hand models (fixed 4 tones x 4 views) ----------------
 
-    SKIN_TONES = ("light", "medium", "tan", "deep")
+    from .prompts import MATRIX_TONES, MATRIX_VIEWS
 
-    def _hand_model_setting(conn, tone: str) -> str | None:
+    def _hand_model_setting(conn, tone: str, view: str) -> str | None:
         row = conn.execute(
-            "SELECT value FROM app_settings WHERE key = ?", (f"hand_model_{tone}",)
+            "SELECT value FROM app_settings WHERE key = ?",
+            (f"hand_model_{tone}_{view}",),
         ).fetchone()
         return row["value"] if row else None
+
+    def _check_cell(tone: str, view: str) -> None:
+        if tone not in MATRIX_TONES:
+            raise HTTPException(status_code=422, detail=f"tone must be one of {MATRIX_TONES}")
+        if view not in MATRIX_VIEWS:
+            raise HTTPException(status_code=422, detail=f"view must be one of {MATRIX_VIEWS}")
 
     @app.get("/api/settings/hand-models")
     def hand_models(request: Request):
         conn = request.app.state.db.conn()
-        out = {}
-        for tone in SKIN_TONES:
-            path = _hand_model_setting(conn, tone)
-            out[tone] = {"configured": bool(path and Path(path).is_file())}
-        return {"hand_models": out}
+        out: dict = {}
+        for tone in MATRIX_TONES:
+            out[tone] = {}
+            for view in MATRIX_VIEWS:
+                path = _hand_model_setting(conn, tone, view)
+                out[tone][view] = {"configured": bool(path and Path(path).is_file())}
+        return {"hand_models": out, "tones": list(MATRIX_TONES), "views": list(MATRIX_VIEWS)}
 
-    @app.post("/api/settings/hand-models/{tone}", dependencies=[Depends(require_admin)])
-    async def upload_hand_model(tone: str, request: Request,
+    @app.post("/api/settings/hand-models/{tone}/{view}",
+              dependencies=[Depends(require_admin)])
+    async def upload_hand_model(tone: str, view: str, request: Request,
                                 file: UploadFile = File(...)):  # noqa: B008 - FastAPI idiom
-        if tone not in SKIN_TONES:
-            raise HTTPException(status_code=422, detail=f"tone must be one of {SKIN_TONES}")
+        _check_cell(tone, view)
         data = await file.read(config.max_upload_mb * 1024 * 1024 + 1)
         fmt, ext = _validated_upload(data)
-        dest = config.upload_dir / "hand-models" / f"{tone}{ext}"
+        dest = config.upload_dir / "hand-models" / f"{tone}-{view}{ext}"
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         from .db import transaction, utcnow
@@ -561,15 +570,15 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
                 "INSERT INTO app_settings (key, value, updated_at) VALUES (?,?,?)"
                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
                 " updated_at = excluded.updated_at",
-                (f"hand_model_{tone}", str(dest), utcnow()),
+                (f"hand_model_{tone}_{view}", str(dest), utcnow()),
             )
-        return {"tone": tone, "stored": dest.name, "format": fmt, "bytes": len(data)}
+        return {"tone": tone, "view": view, "stored": dest.name,
+                "format": fmt, "bytes": len(data)}
 
-    @app.get("/api/settings/hand-models/{tone}/image")
-    def hand_model_image(tone: str, request: Request):
-        if tone not in SKIN_TONES:
-            raise HTTPException(status_code=422, detail=f"tone must be one of {SKIN_TONES}")
-        path_text = _hand_model_setting(request.app.state.db.conn(), tone)
+    @app.get("/api/settings/hand-models/{tone}/{view}/image")
+    def hand_model_image(tone: str, view: str, request: Request):
+        _check_cell(tone, view)
+        path_text = _hand_model_setting(request.app.state.db.conn(), tone, view)
         if not path_text or not Path(path_text).is_file():
             raise HTTPException(status_code=404, detail="hand model not configured")
         path = Path(path_text).resolve()

@@ -343,14 +343,18 @@ class Worker:
             return self.config.hero_size
         return self.config.wearing_size
 
-    def _hand_model_for(self, tone: str) -> Path | None:
-        row = self.db.conn().execute(
-            "SELECT value FROM app_settings WHERE key = ?", (f"hand_model_{tone}",)
-        ).fetchone()
-        if row is None:
-            return None
-        path = Path(row["value"])
-        return path if path.is_file() else None
+    def _hand_model_for(self, tone: str, view: str) -> Path | None:
+        """Cell base photo: exact tone+view asset, else the tone-level legacy one."""
+        conn = self.db.conn()
+        for key in (f"hand_model_{tone}_{view}", f"hand_model_{tone}"):
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+            if row is not None:
+                path = Path(row["value"])
+                if path.is_file():
+                    return path
+        return None
 
     def _design_authority_for(self, style: dict) -> Path | None:
         """Plan upload first, else the latest successful grid."""
@@ -417,7 +421,8 @@ class Worker:
         plan = self._design_authority_for(style)
         if plan is not None:
             references.append(plan)
-        hand = self._hand_model_for(task["metadata"].get("tone", ""))
+        hand = self._hand_model_for(task["metadata"].get("tone", ""),
+                                    task["metadata"].get("view", ""))
         if hand is not None:
             references.append(hand)
         else:

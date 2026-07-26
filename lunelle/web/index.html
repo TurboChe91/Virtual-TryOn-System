@@ -248,6 +248,10 @@
             <option>short</option><option>medium</option><option>long</option>
             <option>extra-long</option></select></div>
         </div>
+        <label>参考图（可选，作为设计与风格参考）</label>
+        <div class="flex">
+          <input id="f_ref" type="file" accept="image/png,image/jpeg,image/webp" style="width:auto; padding:8px">
+        </div>
         <div class="flex" style="margin-top:20px">
           <button class="primary" onclick="createStyle(true)">创建并出图</button>
           <button class="quiet" onclick="createStyle(false)">仅创建</button>
@@ -357,6 +361,12 @@ async function createStyle(alsoGenerate){
   try {
     const out = await api('/api/styles', {method:'POST', body: JSON.stringify(body)});
     let msg = '已创建 ' + out.style.sku;
+    if ($('#f_ref').files.length) {
+      await upload(`/api/styles/${out.style.style_id}/reference-image?kind=reference`,
+                   $('#f_ref').files[0]);
+      msg += '，参考图已上传';
+      $('#f_ref').value = '';
+    }
     if (alsoGenerate) {
       const gen = await api(`/api/styles/${out.style.style_id}/generate`,
         {method:'POST', body: JSON.stringify({output_types:['grid','wearing']})});
