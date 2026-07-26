@@ -254,9 +254,63 @@ class Worker:
             )
             if not qa_doc["passed"]:
                 self._maybe_auto_regen(task, qa_doc, log)
+            else:
+                self._maybe_llm_qa(task, output_path, log)
         except Exception:  # noqa: BLE001 - QA is advisory
             log.warning("qa run crashed; result not recorded", ctx={"stage": "qa"})
             logger.exception("qa failure detail")
+
+    def _maybe_llm_qa(self, task: dict, output_path: Path, log) -> None:
+        """Liberation gate: the vision LLM verifies per-nail identity, auto-approves
+        passes, and on failure WRITES the correction and queues the next version
+        itself (bounded by auto_regen_max on the correction depth)."""
+        if task["output_type"] not in (OUTPUT_GRID, OUTPUT_HERO):
+            return
+        from .llm import LLMUnavailable, auto_qa_verdict, build_llm_chat
+        from .qa import store_qa_result
+
+        try:
+            chat = build_llm_chat(self.config, self.db)
+        except LLMUnavailable:
+            return  # heuristic QA + human review remain the gate
+        style = self.service.get_style(task["style_id"])
+        images = [output_path]
+        for key in ("plan_image_path", "reference_image_path"):
+            candidate = Path(style.get(key) or "")
+            if candidate.is_file():
+                images.append(candidate)
+                break
+        try:
+            verdict = auto_qa_verdict(chat, images, style.get("identity_text") or "",
+                                      task["output_type"])
+        except (RuntimeError, ValueError):
+            log.warning("llm qa failed; leaving human review flag set", ctx={"stage": "qa"})
+            return
+        store_qa_result(self.db, task["task_id"], {
+            "passed": verdict["passed"],
+            "score": 100 if verdict["passed"] else 40,
+            "issues": verdict["issues"],
+            "checks": {"llm_identity_qa": verdict},
+            "recommended_action": "approve" if verdict["passed"] else "correct",
+            "needs_human_review": not verdict["passed"],
+        })
+        log.info("llm qa recorded",
+                 ctx={"stage": "qa", "status": "pass" if verdict["passed"] else "fail"})
+        if verdict["passed"]:
+            return
+        depth = int(task["metadata"].get("auto_correct_depth", 0))
+        if depth >= self.config.auto_regen_max or not verdict["correction"]:
+            return
+        try:
+            new_task = self.service.create_correction(
+                task["task_id"], correction_text=verdict["correction"])
+            self.service.stamp_metadata(new_task["task_id"],
+                                        {"auto_correct_depth": depth + 1,
+                                         "auto_corrected_from": task["task_id"]})
+            log.info("auto-correction queued by llm qa",
+                     ctx={"stage": "qa", "status": f"depth={depth + 1}"})
+        except Exception:  # noqa: BLE001 - budget/conflict ends the loop quietly
+            logger.exception("auto-correction scheduling failed")
 
     def _maybe_auto_regen(self, task: dict, qa_doc: dict, log) -> None:
         """First-shot-or-reroll policy: a hard automatic-QA failure earns one

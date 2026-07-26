@@ -146,6 +146,41 @@ STYLE_USER = """Analyze this nail design image and output ONE JSON object with t
 Use only what is visible. JSON only, no commentary."""
 
 
+AUTO_QA_SYSTEM = (
+    "You are the final quality gate for press-on-nail product images. You compare a "
+    "generated image against its design authority and output a strict JSON verdict."
+)
+
+AUTO_QA_USER = """Image 1 is the GENERATED candidate. Image 2 (if present) is the design authority (plan/reference).
+Design identity (authoritative when present):
+{identity}
+
+Check the candidate strictly: correct nail count and layout for a {output_type} image;
+every nail matches its identity (colors, motif counts, placement); no swapped, duplicated,
+omitted, or invented designs; no text or watermarks; sound hand anatomy if hands are shown.
+
+Output ONE JSON object only:
+{{"passed": true|false,
+  "issues": ["<each concrete defect, naming the nail slot>"],
+  "correction": "<if failed: the exact correction instruction for a locked-base local edit.
+Name ONLY the wrong slots, give set-wide motif COUNT LOCKS
+(e.g. 'exactly two gothic opals in the whole image'),
+and end with which nails must stay completely untouched. Empty string if passed.>"}}"""
+
+
+def auto_qa_verdict(chat: ChatFn, images: list[Path], identity: str, output_type: str) -> dict:
+    reply = chat(AUTO_QA_SYSTEM,
+                 AUTO_QA_USER.format(identity=identity or "(none — judge by coherence)",
+                                     output_type=output_type),
+                 images)
+    doc = extract_json(reply)
+    return {
+        "passed": bool(doc.get("passed")),
+        "issues": [str(item) for item in doc.get("issues", []) if str(item).strip()][:20],
+        "correction": str(doc.get("correction") or "").strip()[:2000],
+    }
+
+
 def identify_nail_identities(chat: ChatFn, image: Path) -> str:
     reply = chat(IDENTITY_SYSTEM, IDENTITY_USER, [image]).strip()
     if "nail-01" not in reply or "nail-10" not in reply:
