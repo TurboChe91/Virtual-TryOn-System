@@ -214,6 +214,54 @@ Hard constraints:
 - No text, labels, boxes, grid lines, logos, or watermarks in the output."""
 
 
+# ---- try-on matrix (4 tones x 4 views per style) ----------------------------
+#
+# Ported from the predecessor run_imagegen_matrix.py. Image 1 = design authority
+# (plan upload or the latest grid), Image 2 = the configured hand model for the
+# cell's skin tone (pose/skin/background authority). Views and their scene
+# contracts come from contracts/matrix_views.json (content-hashed into the
+# prompt version).
+
+_MATRIX_CONTRACT_TEXT = (
+    resources.files("lunelle").joinpath("contracts/matrix_views.json").read_text("utf-8")
+)
+MATRIX_CONTRACT = json.loads(_MATRIX_CONTRACT_TEXT)
+MATRIX_TONES = tuple(MATRIX_CONTRACT["tones"])
+MATRIX_VIEWS = tuple(MATRIX_CONTRACT["views"])
+MATRIX_PROMPT_VERSION = (
+    "mx-1+" + hashlib.sha256(_MATRIX_CONTRACT_TEXT.encode()).hexdigest()[:8]
+)
+
+MATRIX_REFERENCE_BLOCK = """INPUT AUTHORITY — do not mix these roles:
+- Image 1 is the design authority for this press-on nail set. It is the ONLY authority for nail-art colors, motifs, decorations, finish, and per-nail length and silhouette. Its layout and background are packaging only; never reproduce them.
+- Image 2 is the immutable base hand photo. It is authority only for hand pose, hand geometry, crop, skin tone, background, and lighting. Never copy its manicure, nail length, or nail silhouette.
+
+"""
+
+
+def build_matrix_prompt(spec: StyleSpec, identity_text: str | None,
+                        tone: str, view: str, with_reference: bool) -> str:
+    view_doc = MATRIX_CONTRACT["views"][view]
+    identity_block = (identity_text or "").strip() or build_identity_block(spec)
+    reference_block = MATRIX_REFERENCE_BLOCK if with_reference else ""
+    return f"""{reference_block}Photorealistic virtual nail try-on photo for e-commerce.
+
+{view_doc["scene"]}
+Skin: {MATRIX_CONTRACT["tones"][tone]}. Background and lighting must match the base hand photo.
+
+Visible nails this render: {", ".join(view_doc["visible_nails"])}
+{view_doc["mapping_note"]}
+
+NAIL SET IDENTITY (the visible nails wear this exact design — do not swap, duplicate, omit, homogenize, simplify, recolor, or invent):
+{identity_block}
+
+Hard constraints:
+- Apply only the listed nail designs; nail length and silhouette come from the design authority per nail.
+- Natural press-on attachment: cuticle shadows, glossy topcoat, curved highlights; true material depth for pearls, crystals, and metal.
+- Preserve the exact base-photo hand count and view scope; never add another hand to a single-hand view.
+- No text, labels, boxes, arrows, grid lines, logos, or watermarks."""
+
+
 # ---- correction (v2+ = locked-base local edit, never a free re-roll) --------
 #
 # Protocol proven on style-wechat-35-9 (PASS in 3 versions): narrow the scope

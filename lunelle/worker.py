@@ -20,7 +20,7 @@ from pathlib import Path
 from .config import Config
 from .db import Database
 from .logging_setup import task_logger
-from .models import OUTPUT_GRID, OUTPUT_HERO, OUTPUT_WEARING
+from .models import OUTPUT_GRID, OUTPUT_HERO, OUTPUT_MATRIX_CELL, OUTPUT_WEARING
 from .profiles import ProviderResolver
 from .prompts import strip_reference_block
 from .providers import GenerationRequest, ImageProvider, ProviderError
@@ -141,6 +141,7 @@ class Worker:
             task["metadata"].get("use_reference")
             or task["metadata"].get("use_style_reference")
             or task["metadata"].get("use_hero_reference")
+            or task["metadata"].get("use_matrix_reference")
         )
         if expected_reference and not references:
             # Text-only fallback: the stored prompt must not claim an Image 1 exists.
@@ -240,8 +241,11 @@ class Worker:
                 grid_task = self.service.latest_successful_grid(task["style_id"])
                 if grid_task and grid_task.get("output_path"):
                     grid_path = Path(grid_task["output_path"])
+            # Matrix cells reuse the wearing heuristics (hand shot, no grid diff).
+            qa_type = OUTPUT_WEARING if task["output_type"] == OUTPUT_MATRIX_CELL \
+                else task["output_type"]
             qa_doc = run_qa(
-                output_type=task["output_type"],
+                output_type=qa_type,
                 image_path=output_path,
                 expected_size=size,
                 min_side=min(self.config.qa_min_side, min(size)),
@@ -264,7 +268,7 @@ class Worker:
         """Liberation gate: the vision LLM verifies per-nail identity, auto-approves
         passes, and on failure WRITES the correction and queues the next version
         itself (bounded by auto_regen_max on the correction depth)."""
-        if task["output_type"] not in (OUTPUT_GRID, OUTPUT_HERO):
+        if task["output_type"] not in (OUTPUT_GRID, OUTPUT_HERO, OUTPUT_MATRIX_CELL):
             return
         from .llm import LLMUnavailable, auto_qa_verdict, build_llm_chat
         from .qa import store_qa_result
@@ -339,9 +343,32 @@ class Worker:
             return self.config.hero_size
         return self.config.wearing_size
 
+    def _hand_model_for(self, tone: str) -> Path | None:
+        row = self.db.conn().execute(
+            "SELECT value FROM app_settings WHERE key = ?", (f"hand_model_{tone}",)
+        ).fetchone()
+        if row is None:
+            return None
+        path = Path(row["value"])
+        return path if path.is_file() else None
+
+    def _design_authority_for(self, style: dict) -> Path | None:
+        """Plan upload first, else the latest successful grid."""
+        plan = Path(style.get("plan_image_path") or "")
+        if plan.is_file():
+            return plan
+        grid_task = self.service.latest_successful_grid(style["style_id"])
+        if grid_task and grid_task.get("output_path"):
+            grid_path = Path(grid_task["output_path"])
+            if grid_path.is_file():
+                return grid_path
+        return None
+
     def _resolve_references(self, task: dict, log) -> list[Path]:
         if task["output_type"] == OUTPUT_HERO:
             return self._resolve_hero_references(task, log)
+        if task["output_type"] == OUTPUT_MATRIX_CELL:
+            return self._resolve_matrix_references(task, log)
         if task["output_type"] == OUTPUT_GRID:
             if not task["metadata"].get("use_style_reference"):
                 return []
@@ -370,16 +397,7 @@ class Worker:
         if not task["metadata"].get("use_hero_reference"):
             return []
         style = self.service.get_style(task["style_id"])
-        plan: Path | None = None
-        uploaded_plan = Path(style.get("plan_image_path") or "")
-        if uploaded_plan.is_file():
-            plan = uploaded_plan
-        else:
-            grid_task = self.service.latest_successful_grid(task["style_id"])
-            if grid_task and grid_task.get("output_path"):
-                grid_path = Path(grid_task["output_path"])
-                if grid_path.is_file():
-                    plan = grid_path
+        plan = self._design_authority_for(style)
         if plan is None:
             log.info("no plan image or grid available; generating hero text-only",
                      ctx={"stage": "reference"})
@@ -388,6 +406,26 @@ class Worker:
         photo_ref = Path(style.get("reference_image_path") or "")
         if photo_ref.is_file():
             references.append(photo_ref)
+        return references
+
+    def _resolve_matrix_references(self, task: dict, log) -> list[Path]:
+        """Image 1 = design authority, Image 2 = the cell tone's hand model."""
+        if not task["metadata"].get("use_matrix_reference"):
+            return []
+        style = self.service.get_style(task["style_id"])
+        references: list[Path] = []
+        plan = self._design_authority_for(style)
+        if plan is not None:
+            references.append(plan)
+        hand = self._hand_model_for(task["metadata"].get("tone", ""))
+        if hand is not None:
+            references.append(hand)
+        else:
+            log.info("no hand model configured for tone; relying on prompt only",
+                     ctx={"stage": "reference"})
+        if not references:
+            log.info("no design authority available; generating cell text-only",
+                     ctx={"stage": "reference"})
         return references
 
 

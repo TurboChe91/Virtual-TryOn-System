@@ -35,8 +35,12 @@ from .models import (
     new_task_id,
 )
 from .prompts import (
+    MATRIX_PROMPT_VERSION,
+    MATRIX_TONES,
+    MATRIX_VIEWS,
     PromptBundle,
     build_correction_prompt,
+    build_matrix_prompt,
     build_prompt_bundle,
     prompt_for_output_type,
     prompt_version_for,
@@ -315,6 +319,95 @@ class TaskService:
         )
         return GenerationPlan(batch_id=batch_id, created=created, reused=reused, skipped=skipped)
 
+    def create_matrix_generation(
+        self, style_id: str, *, tones: list[str] | None = None,
+        views: list[str] | None = None, force: bool = False, note: str = ""
+    ) -> GenerationPlan:
+        """Queue the try-on matrix for one style: every tone x view cell."""
+        from .models import OUTPUT_MATRIX_CELL
+
+        style = self.get_style(style_id)
+        spec = self.spec_for(style)
+        tones = [t for t in (tones or MATRIX_TONES) if t in MATRIX_TONES]
+        views = [v for v in (views or MATRIX_VIEWS) if v in MATRIX_VIEWS]
+        if not tones or not views:
+            raise ValueError(f"tones must be within {MATRIX_TONES} and views within {MATRIX_VIEWS}")
+        provider_name, model, price, profile_name = self._generation_channel()
+        use_refs = self.config.reference_mode != "off"
+
+        conn = self.db.conn()
+        batch_id = new_batch_id()
+        now = utcnow()
+        created: list[dict] = []
+        reused: list[dict] = []
+        skipped: list[dict] = []
+        with transaction(conn):
+            conn.execute(
+                "INSERT INTO batches (batch_id, note, created_at) VALUES (?,?,?)",
+                (batch_id, note or f"try-on matrix {len(tones)}x{len(views)}", now),
+            )
+            for tone in tones:
+                for view in views:
+                    prompt = build_matrix_prompt(
+                        spec, style.get("identity_text"), tone, view, with_reference=use_refs
+                    )
+                    nonce = batch_id if force else ""
+                    key = self.idempotency_key(
+                        style_id, OUTPUT_MATRIX_CELL, MATRIX_PROMPT_VERSION, prompt, nonce
+                    )
+                    existing = conn.execute(
+                        "SELECT * FROM tasks WHERE idempotency_key = ?", (key,)
+                    ).fetchone()
+                    cell = {"tone": tone, "view": view}
+                    if existing is not None:
+                        status = existing["status"]
+                        if status in (PENDING, RUNNING, RETRYING):
+                            reused.append({"task_id": existing["task_id"], "status": status,
+                                           "output_type": OUTPUT_MATRIX_CELL, **cell,
+                                           "reason": "already in progress"})
+                            continue
+                        if status == SUCCESS:
+                            skipped.append({"task_id": existing["task_id"], "status": status,
+                                            "output_type": OUTPUT_MATRIX_CELL, **cell,
+                                            "reason": "already succeeded"})
+                            continue
+                        self._transition_locked(conn, existing["task_id"], status, PENDING,
+                                                error_code=None, error_message=None,
+                                                next_attempt_at=None, retry_count=0)
+                        reused.append({"task_id": existing["task_id"], "status": PENDING,
+                                       "output_type": OUTPUT_MATRIX_CELL, **cell,
+                                       "reason": "re-queued failed cell"})
+                        continue
+                    task_id = new_task_id()
+                    metadata: dict = {"tone": tone, "view": view}
+                    if note:
+                        metadata["note"] = note
+                    if profile_name:
+                        metadata["api_profile"] = profile_name
+                    if use_refs:
+                        metadata["use_matrix_reference"] = True
+                    conn.execute(
+                        "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
+                        " negative_prompt, prompt_version, provider, model, status, retry_count,"
+                        " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
+                        " created_at, updated_at, metadata_json)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            task_id, batch_id, style_id, style["sku"], OUTPUT_MATRIX_CELL,
+                            prompt, "", MATRIX_PROMPT_VERSION, provider_name, model,
+                            PENDING, 0, self.config.max_retries, price, key, None,
+                            now, now, json.dumps(metadata, ensure_ascii=False),
+                        ),
+                    )
+                    created.append({"task_id": task_id, "status": PENDING,
+                                    "output_type": OUTPUT_MATRIX_CELL, **cell})
+        logger.info(
+            "matrix planned",
+            extra={"ctx": {"batch_id": batch_id, "style_id": style_id, "stage": "plan",
+                            "status": f"created={len(created)} skipped={len(skipped)}"}},
+        )
+        return GenerationPlan(batch_id=batch_id, created=created, reused=reused, skipped=skipped)
+
     def create_correction(
         self,
         task_id: str,
@@ -443,11 +536,17 @@ class TaskService:
         rows = self.db.conn().execute(
             f"SELECT task_id, batch_id, style_id, sku, output_type, prompt_version, provider,"  # noqa: S608
             f" model, status, retry_count, max_retries, estimated_cost_usd, actual_cost_usd,"
-            f" created_at, started_at, completed_at, updated_at, output_path, error_code"
+            f" created_at, started_at, completed_at, updated_at, output_path, error_code,"
+            f" metadata_json"
             f" FROM tasks {where} ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",  # noqa: S608
             (*params, limit, offset),
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            doc = dict(r)
+            doc["metadata"] = json.loads(doc.pop("metadata_json") or "{}")
+            out.append(doc)
+        return out
 
     def list_batches(self, limit: int = 50) -> list[dict]:
         rows = self.db.conn().execute(

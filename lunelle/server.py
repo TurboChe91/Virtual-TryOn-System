@@ -26,6 +26,7 @@ from .schemas import (
     ExportRequest,
     GenerateRequest,
     IdentityRequest,
+    MatrixRequest,
     ProfileCreateRequest,
     ProfileUpdateRequest,
     RetryRequest,
@@ -322,11 +323,24 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         return {"batch_id": plan.batch_id, "created": plan.created,
                 "reused": plan.reused, "skipped": plan.skipped}
 
+    @app.post("/api/styles/{style_id}/matrix", status_code=202,
+              dependencies=[Depends(require_admin)])
+    def generate_matrix(style_id: str, body: MatrixRequest, request: Request):
+        try:
+            plan = request.app.state.service.create_matrix_generation(
+                style_id, tones=body.tones or None, views=body.views or None,
+                force=body.force, note=body.note,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"batch_id": plan.batch_id, "created": plan.created,
+                "reused": plan.reused, "skipped": plan.skipped}
+
     @app.get("/api/tasks")
     def list_tasks(request: Request,
                    sku: str | None = None,
                    status: str | None = Query(None, pattern="^(" + "|".join(STATUSES) + ")$"),
-                   output_type: str | None = Query(None, pattern="^(" + "|".join(OUTPUT_TYPES) + ")$"),
+                   output_type: str | None = Query(None, pattern="^(" + "|".join(OUTPUT_TYPES) + ")$"),  # noqa: B008
                    batch_id: str | None = None,
                    limit: int = Query(100, ge=1, le=500),
                    offset: int = Query(0, ge=0)):

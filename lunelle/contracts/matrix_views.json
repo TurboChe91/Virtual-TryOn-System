@@ -1,0 +1,101 @@
+{
+  "contract": "imagegen_direct_matrix_v2",
+  "tones": {
+    "light": "light skin tone",
+    "medium": "medium brown skin tone",
+    "tan": "warm tan skin tone",
+    "deep": "deep brown skin tone"
+  },
+  "views": {
+    "p2_open_hands": {
+      "base_file": "p2-open-hands.webp",
+      "visible_nails": ["nail-01", "nail-02", "nail-03", "nail-04", "nail-05", "nail-06", "nail-07", "nail-08", "nail-09", "nail-10"],
+      "scene": "Both hands shown from the BACKS of the hands, not palms, with fingers open, extended and gently fanned exactly like Image 2; all ten fingernails clearly visible, thumbs angled inward near the lower center, soft cream fabric background and soft studio lighting. Match Image 2 hand pose, geometry, skin tone, crop, and lighting exactly. FORBIDDEN: palms toward camera, curled Hero hands, clenched hands, or hidden fingers.",
+      "mapping_source": "shopify-theme/assets/tryon-ai/annotations/natural/light/p2-open-hands-labeled.png",
+      "screen_slots": {
+        "left_upper_fingers_left_to_right": ["nail-05", "nail-04", "nail-03", "nail-02"],
+        "left_thumb": {"nail_id": "nail-01", "position": "lower-center-left"},
+        "right_upper_fingers_left_to_right": ["nail-07", "nail-08", "nail-09", "nail-10"],
+        "right_thumb": {"nail_id": "nail-06", "position": "lower-center-right"}
+      },
+      "mapping_note": "Authoritative labeled-image mapping: LEFT upper SCREEN LEFT-to-RIGHT = nail-05, nail-04, nail-03, nail-02 with nail-01 lower-center-left thumb; RIGHT upper SCREEN LEFT-to-RIGHT = nail-07, nail-08, nail-09, nail-10 with nail-06 lower-center-right thumb. Do not infer or mirror.",
+      "pose_map": {
+        "nail-05": {"x": 0.10, "y": 0.27, "rotation_ccw": 18, "fingertip": "up-left"},
+        "nail-04": {"x": 0.22, "y": 0.25, "rotation_ccw": 10, "fingertip": "up-left"},
+        "nail-03": {"x": 0.34, "y": 0.24, "rotation_ccw": 0, "fingertip": "up"},
+        "nail-02": {"x": 0.45, "y": 0.27, "rotation_ccw": -14, "fingertip": "up-right"},
+        "nail-01": {"x": 0.42, "y": 0.66, "rotation_ccw": -48, "fingertip": "up-right"},
+        "nail-07": {"x": 0.55, "y": 0.27, "rotation_ccw": 14, "fingertip": "up-left"},
+        "nail-08": {"x": 0.66, "y": 0.24, "rotation_ccw": 5, "fingertip": "up-left"},
+        "nail-09": {"x": 0.78, "y": 0.25, "rotation_ccw": -8, "fingertip": "up-right"},
+        "nail-10": {"x": 0.90, "y": 0.27, "rotation_ccw": -18, "fingertip": "up-right"},
+        "nail-06": {"x": 0.58, "y": 0.66, "rotation_ccw": 48, "fingertip": "up-left"}
+      }
+    },
+    "p3_right_hand": {
+      "base_file": "p3-right-hand.webp",
+      "visible_nails": ["nail-06", "nail-07", "nail-08", "nail-09", "nail-10"],
+      "scene": "Right hand only, back of hand angled toward camera, five fingernails clearly visible, soft cream fabric background, soft studio lighting. Match Image 2 pose and skin tone exactly.",
+      "mapping_source": "shopify-theme/assets/tryon-ai/annotations/natural/light/p3-right-hand-labeled.png",
+      "screen_slots": {
+        "upper_fingers_left_to_right": ["nail-07", "nail-08", "nail-09", "nail-10"],
+        "thumb": {"nail_id": "nail-06", "position": "lower-left"}
+      },
+      "mapping_note": "Authoritative labeled-image mapping: upper four fingers SCREEN LEFT-to-RIGHT = nail-07, nail-08, nail-09, nail-10; nail-06 is the separate lower-left thumb. Do not infer or mirror.",
+      "pose_map": {
+        "nail-07": {"x": 0.18, "y": 0.27, "rotation_ccw": 42, "fingertip": "up-left"},
+        "nail-08": {"x": 0.38, "y": 0.25, "rotation_ccw": 20, "fingertip": "up-left"},
+        "nail-09": {"x": 0.58, "y": 0.24, "rotation_ccw": 4, "fingertip": "up"},
+        "nail-10": {"x": 0.78, "y": 0.27, "rotation_ccw": -12, "fingertip": "up-right"},
+        "nail-06": {"x": 0.25, "y": 0.68, "rotation_ccw": 58, "fingertip": "up-left"}
+      }
+    },
+    "p4_thumb_visible": {
+      "base_file": "p4-thumb-visible.webp",
+      "visible_nails": ["nail-01", "nail-02", "nail-03", "nail-04", "nail-05", "nail-06", "nail-07", "nail-08", "nail-09", "nail-10"],
+      "scene": "Both hands with thumbs prominently visible and nearly horizontal, all ten nails readable, cream fabric background, soft studio lighting. Match Image 2 pose exactly.",
+      "mapping_source": "shopify-theme/assets/tryon-ai/annotations/natural/light/p4-thumb-visible-labeled.png",
+      "screen_slots": {
+        "left_upper_fingers_left_to_right": ["nail-02", "nail-03", "nail-04", "nail-05"],
+        "left_thumb": {"nail_id": "nail-01", "position": "lower-left"},
+        "right_upper_fingers_left_to_right": ["nail-10", "nail-09", "nail-08", "nail-07"],
+        "right_thumb": {"nail_id": "nail-06", "position": "lower-right"}
+      },
+      "mapping_note": "Authoritative labeled-image mapping: LEFT upper fingers SCREEN LEFT-to-RIGHT = nail-02, nail-03, nail-04, nail-05 with nail-01 lower-left thumb; RIGHT upper fingers SCREEN LEFT-to-RIGHT = nail-10, nail-09, nail-08, nail-07 with nail-06 lower-right thumb. Do not infer or mirror. Thumb motifs rotate with the thumb axes.",
+      "pose_map": {
+        "nail-02": {"x": 0.10, "y": 0.27, "rotation_ccw": 0, "fingertip": "up"},
+        "nail-03": {"x": 0.22, "y": 0.25, "rotation_ccw": 0, "fingertip": "up"},
+        "nail-04": {"x": 0.34, "y": 0.27, "rotation_ccw": 0, "fingertip": "up"},
+        "nail-05": {"x": 0.45, "y": 0.34, "rotation_ccw": 0, "fingertip": "up"},
+        "nail-10": {"x": 0.55, "y": 0.34, "rotation_ccw": 0, "fingertip": "up"},
+        "nail-09": {"x": 0.66, "y": 0.27, "rotation_ccw": 0, "fingertip": "up"},
+        "nail-08": {"x": 0.78, "y": 0.25, "rotation_ccw": 0, "fingertip": "up"},
+        "nail-07": {"x": 0.90, "y": 0.27, "rotation_ccw": 0, "fingertip": "up"},
+        "nail-01": {"x": 0.25, "y": 0.68, "rotation_ccw": 90, "fingertip": "left"},
+        "nail-06": {"x": 0.75, "y": 0.68, "rotation_ccw": -90, "fingertip": "right"}
+      }
+    },
+    "p5_left_hand": {
+      "base_file": "p5-left-hand.webp",
+      "visible_nails": ["nail-01", "nail-02", "nail-03", "nail-04", "nail-05"],
+      "scene": "Left hand only, back of hand toward camera, five fingernails clearly visible, soft cream fabric background, soft studio lighting. Match Image 2 pose and skin tone exactly.",
+      "mapping_source": "shopify-theme/assets/tryon-ai/annotations/natural/light/p5-left-hand-labeled.png",
+      "screen_slots": {
+        "upper_fingers_left_to_right": ["nail-05", "nail-04", "nail-03", "nail-02"],
+        "thumb": {"nail_id": "nail-01", "position": "lower-right"}
+      },
+      "mapping_note": "Authoritative labeled-image mapping: upper four fingers SCREEN LEFT-to-RIGHT = nail-05, nail-04, nail-03, nail-02; nail-01 is the separate lower-right thumb. Do not infer or mirror. Do not paint right-hand nails.",
+      "pose_map": {
+        "nail-05": {"x": 0.18, "y": 0.27, "rotation_ccw": 8, "fingertip": "up-left"},
+        "nail-04": {"x": 0.38, "y": 0.25, "rotation_ccw": 4, "fingertip": "up"},
+        "nail-03": {"x": 0.58, "y": 0.24, "rotation_ccw": 0, "fingertip": "up"},
+        "nail-02": {"x": 0.78, "y": 0.27, "rotation_ccw": -10, "fingertip": "up-right"},
+        "nail-01": {"x": 0.82, "y": 0.68, "rotation_ccw": -52, "fingertip": "up-right"}
+      }
+    }
+  },
+  "hero_listing": {
+    "note": "Separate from 4x4 matrix. Already validated at temp/imagegen-direct/<style>/v4|v2.png via run_imagegen_direct.py",
+    "counts_in_matrix": false
+  }
+}

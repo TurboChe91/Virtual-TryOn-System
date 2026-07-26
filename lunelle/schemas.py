@@ -159,6 +159,16 @@ class ReviewRequest(BaseModel):
     note: str = Field(default="", max_length=300)
 
 
+class MatrixRequest(BaseModel):
+    """Queue the try-on matrix; empty lists mean all tones / all views."""
+
+    model_config = ConfigDict(extra="forbid")
+    tones: list[Literal["light", "medium", "tan", "deep"]] = Field(default_factory=list)
+    views: list[str] = Field(default_factory=list)
+    force: bool = False
+    note: str = Field(default="", max_length=200)
+
+
 class IdentityRequest(BaseModel):
     """Per-nail identity text (the predecessor identity.txt format) for hero prompts."""
 

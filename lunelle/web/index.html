@@ -239,7 +239,7 @@
         <textarea id="f_desc" placeholder="奶白色杏仁形，珍珠点缀，细金线与法式甲尖，亮面"></textarea>
         <label>名称（可留空，自动生成）</label>
         <input id="f_name" placeholder="Pearl French">
-        <div class="trio">
+        <div class="trio" style="grid-template-columns:1fr 1fr">
           <div><label>甲型</label><select id="f_shape"><option value="">自动</option>
             <option>almond</option><option>coffin</option><option>square</option>
             <option>tapered-square</option><option>squoval</option><option>oval</option>
@@ -247,9 +247,6 @@
           <div><label>长度</label><select id="f_length"><option value="">自动</option>
             <option>short</option><option>medium</option><option>long</option>
             <option>extra-long</option></select></div>
-          <div><label>肤色</label><select id="f_skin"><option value="">light</option>
-            <option>light</option><option>medium</option><option>tan</option>
-            <option>deep</option></select></div>
         </div>
         <div class="flex" style="margin-top:20px">
           <button class="primary" onclick="createStyle(true)">创建并出图</button>
@@ -279,7 +276,8 @@
         <option>pending</option><option>running</option><option>success</option>
         <option>failed</option><option>retrying</option><option>cancelled</option></select>
       <select id="q_type" onchange="loadTasks()"><option value="">全部类型</option>
-        <option>grid</option><option>wearing</option><option>hero</option></select>
+        <option>grid</option><option>wearing</option><option>hero</option>
+        <option>matrix_cell</option></select>
       <span class="sp"></span>
       <button class="quiet sm" onclick="loadTasks()">刷新</button>
     </div>
@@ -301,7 +299,9 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const token = () => localStorage.getItem('lunelle_token') || '';
-const TYPE_LABEL = {grid:'商品图', wearing:'佩戴图', hero:'上架主图', matrix_cell:'试戴格', repair:'修补'};
+const TYPE_LABEL = {grid:'商品图', wearing:'佩戴图', hero:'上架主图', matrix_cell:'试戴图', repair:'修补'};
+const TONE_LABEL = {light:'浅肤', medium:'中肤', tan:'小麦', deep:'深肤'};
+const VIEW_LABEL = {p2_open_hands:'双手展开', p3_right_hand:'右手', p4_thumb_visible:'双手拇指', p5_left_hand:'左手'};
 const ST_LABEL = {pending:'排队中', running:'生成中', success:'完成', failed:'失败',
                   retrying:'重试中', cancelled:'已取消'};
 
@@ -353,7 +353,6 @@ async function createStyle(alsoGenerate){
     description: $('#f_desc').value.trim(),
     shape: $('#f_shape').value || null,
     length: $('#f_length').value || null,
-    skin_tone: $('#f_skin').value || null,
   };
   try {
     const out = await api('/api/styles', {method:'POST', body: JSON.stringify(body)});
@@ -415,6 +414,7 @@ async function loadStyles(){
         <div class="cacts">
           <button class="sm quiet" onclick="generateTypes('${s.style_id}',['grid','wearing'])">出图</button>
           <button class="sm quiet" onclick="generateTypes('${s.style_id}',['hero'])">主图</button>
+          <button class="sm quiet" onclick="generateMatrix('${s.style_id}')">试戴</button>
           <button class="sm link" onclick="manageStyle('${s.style_id}')">管理</button>
         </div>
       </div></div>`;
@@ -488,6 +488,17 @@ async function saveIdentity(styleId){
     toast('已保存'); $('#modal').style.display='none'; loadStyles();
   } catch(e){ toast('保存失败：' + e.message, 6000); }
 }
+async function generateMatrix(styleId){
+  if (!confirm('生成试戴矩阵：4 种肤色 × 4 个视角，共 16 张。继续？')) return;
+  try {
+    const gen = await api(`/api/styles/${styleId}/matrix`,
+      {method:'POST', body: JSON.stringify({})});
+    toast(`试戴矩阵已排队 ${gen.created.length} 格` +
+      (gen.skipped.length ? `，${gen.skipped.length} 格已有成品` : ''));
+    loadTasks(); loadMetrics();
+  } catch(e){ toast('排队失败：' + e.message, 6000); }
+}
+
 async function generateTypes(styleId, types){
   try {
     const gen = await api(`/api/styles/${styleId}/generate`,
@@ -506,7 +517,9 @@ async function loadTasks(){
   const out = await api('/api/tasks?' + p);
   $('#tasksTable tbody').innerHTML = out.tasks.map(t => `<tr class="rowlink">
     <td class="mono">${esc(t.sku)}</td>
-    <td>${esc(TYPE_LABEL[t.output_type]||t.output_type)}</td>
+    <td>${esc(TYPE_LABEL[t.output_type]||t.output_type)}${
+      t.output_type==='matrix_cell' && t.metadata && t.metadata.tone
+        ? ` <span class="mono muted" style="font-size:11px">${esc(TONE_LABEL[t.metadata.tone]||t.metadata.tone)}·${esc(VIEW_LABEL[t.metadata.view]||t.metadata.view)}</span>` : ''}</td>
     <td><span class="st ${esc(t.status)}">${esc(ST_LABEL[t.status]||t.status)}</span>${
       t.error_code?` <span class="mono muted" style="font-size:11px">${esc(t.error_code)}</span>`:''}</td>
     <td class="mono muted">${esc((t.created_at||'').replace('T',' ').replace('Z','').slice(5,16))}</td>
@@ -529,13 +542,15 @@ async function showTask(id){
   try {
     const t = await api('/api/tasks/' + id);
     const ver = t.metadata && t.metadata.version ? t.metadata.version : 1;
-    const reviewState = t.qa ? (t.qa.needs_human_review ? '待确认' : '已确认') : '';
-    const reviewBtns = (t.status==='success' && t.qa) ? `
-      <button class="sm quiet" onclick="reviewTask('${t.task_id}',true)">确认可用</button>
-      <button class="sm quiet" onclick="reviewTask('${t.task_id}',false)">不合格</button>` : '';
-    const qa = t.qa ? `<h3>自动检查 · ${t.qa.passed?'通过':'发现问题'}${reviewState?' · '+reviewState:''}</h3>
-      <div class="flex">${reviewBtns}</div>
-      ${t.qa.issues.length?`<pre>${esc(JSON.stringify(t.qa.issues, null, 2))}</pre>`:''}` : '';
+    const qa = t.qa ? (t.qa.passed
+      ? `<h3>自动检查已通过</h3>
+         <div class="flex"><span class="muted" style="font-size:12.5px">如实物不符可</span>
+         <button class="sm link" onclick="reviewTask('${t.task_id}',false)">标记不合格</button></div>`
+      : `<h3>自动检查发现问题</h3>
+         ${t.qa.issues.length?`<pre>${esc(JSON.stringify(t.qa.issues, null, 2))}</pre>`:''}
+         <div class="flex">
+           <button class="sm quiet" onclick="reviewTask('${t.task_id}',true)">人工判定可用</button>
+         </div>`) : '';
     const img = t.status==='success' ? `<img class="preview" src="/api/tasks/${id}/image">` : '';
     const correctForm = t.status==='success' ? `
       <h3>提交修正（将创建 v${ver+1}，锁定本版为底图的局部编辑）</h3>
