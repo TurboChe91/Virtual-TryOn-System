@@ -340,7 +340,9 @@ def store_qa_result(db: Database, task_id: str, qa_doc: dict) -> None:
                 qa_doc["score"],
                 json.dumps(qa_doc["issues"], ensure_ascii=False),
                 json.dumps(
-                    {"checks": qa_doc["checks"], "manual_review_items": qa_doc["manual_review_items"]},
+                    {"checks": qa_doc["checks"],
+                     # Optional: LLM-gate verdicts and external callers don't carry it.
+                     "manual_review_items": qa_doc.get("manual_review_items", [])},
                     ensure_ascii=False,
                 ),
                 qa_doc["recommended_action"],

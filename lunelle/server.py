@@ -23,6 +23,7 @@ from .profiles import ProfileService
 from .providers import build_chat_fn, build_provider
 from .qa import run_qa
 from .schemas import (
+    CloudflareConfigRequest,
     ExportRequest,
     GenerateRequest,
     IdentityRequest,
@@ -32,6 +33,7 @@ from .schemas import (
     RetryRequest,
     ReviewRequest,
     StyleCreateRequest,
+    TryonIdRequest,
 )
 from .stats import collect_stats
 from .styles import StyleInputError, build_style_spec
@@ -322,6 +324,77 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         )
         return {"batch_id": plan.batch_id, "created": plan.created,
                 "reused": plan.reused, "skipped": plan.skipped}
+
+    @app.put("/api/styles/{style_id}/tryon-id", dependencies=[Depends(require_admin)])
+    def set_tryon_id(style_id: str, body: TryonIdRequest, request: Request):
+        import re as _re
+
+        service: TaskService = request.app.state.service
+        service.get_style(style_id)
+        if body.tryon_style_id and not _re.fullmatch(r"\d{3}", body.tryon_style_id):
+            raise HTTPException(status_code=422, detail="try-on id must be 3 digits, e.g. 001")
+        try:
+            service.set_tryon_id(style_id, body.tryon_style_id)
+        except Exception as exc:  # noqa: BLE001 - unique index collision
+            raise HTTPException(status_code=409,
+                                detail="该编号已被其他款式占用") from exc
+        return {"style_id": style_id, "tryon_style_id": body.tryon_style_id or None}
+
+    @app.get("/api/styles/{style_id}/publish-readiness")
+    def publish_readiness(style_id: str, request: Request):
+        from .cloudflare import load_cf_config
+        from .publish import collect_publishable_cells
+
+        service: TaskService = request.app.state.service
+        style = service.get_style(style_id)
+        ready, excluded = collect_publishable_cells(request.app.state.db, style_id)
+        return {
+            "tryon_style_id": style.get("tryon_style_id"),
+            "cloudflare_configured": load_cf_config(request.app.state.db) is not None,
+            "ready_cells": len(ready),
+            "excluded_cells": excluded,
+        }
+
+    @app.post("/api/styles/{style_id}/publish", dependencies=[Depends(require_admin)])
+    def publish(style_id: str, request: Request):
+        from .cloudflare import CloudflareClient, CloudflareError, load_cf_config
+        from .publish import PublishError, publish_style
+
+        cf = load_cf_config(request.app.state.db)
+        if cf is None:
+            raise HTTPException(status_code=409,
+                                detail="Cloudflare 发布通道未配置；先在设置页填入凭证")
+        try:
+            return publish_style(request.app.state.db, request.app.state.service,
+                                 CloudflareClient(cf), style_id)
+        except PublishError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except CloudflareError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # ---------------- Cloudflare publish channel settings ----------------
+
+    @app.get("/api/settings/cloudflare")
+    def cloudflare_settings(request: Request):
+        from .cloudflare import cf_config_public
+
+        return cf_config_public(request.app.state.db)
+
+    @app.post("/api/settings/cloudflare", dependencies=[Depends(require_admin)])
+    def save_cloudflare(body: CloudflareConfigRequest, request: Request):
+        from .cloudflare import cf_config_public, save_cf_config
+
+        save_cf_config(request.app.state.db, body.model_dump())
+        return cf_config_public(request.app.state.db)
+
+    @app.post("/api/settings/cloudflare/test", dependencies=[Depends(require_admin)])
+    def test_cloudflare(request: Request):
+        from .cloudflare import CloudflareClient, load_cf_config
+
+        cf = load_cf_config(request.app.state.db)
+        if cf is None:
+            raise HTTPException(status_code=409, detail="凭证不完整")
+        return CloudflareClient(cf).test()
 
     @app.post("/api/styles/{style_id}/matrix", status_code=202,
               dependencies=[Depends(require_admin)])

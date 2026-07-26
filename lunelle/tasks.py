@@ -150,8 +150,12 @@ class TaskService:
     def set_identity_text(self, style_id: str, text: str) -> None:
         self._set_style_column(style_id, "identity_text", text.strip() or None)
 
+    def set_tryon_id(self, style_id: str, tryon_id: str) -> None:
+        self._set_style_column(style_id, "tryon_style_id", tryon_id.strip() or None)
+
     def _set_style_column(self, style_id: str, column: str, value) -> None:
-        assert column in ("reference_image_path", "plan_image_path", "identity_text")
+        assert column in ("reference_image_path", "plan_image_path", "identity_text",
+                          "tryon_style_id")
         conn = self.db.conn()
         with transaction(conn):
             cur = conn.execute(  # noqa: S608 - column restricted by the assert above

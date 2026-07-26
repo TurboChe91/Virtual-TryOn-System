@@ -169,6 +169,22 @@ class MatrixRequest(BaseModel):
     note: str = Field(default="", max_length=200)
 
 
+class TryonIdRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    tryon_style_id: str = Field(default="", max_length=8,
+                                description="3-digit Worker style id, empty clears")
+
+
+class CloudflareConfigRequest(BaseModel):
+    """Partial update; blank fields keep their stored values."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    cf_account_id: str = Field(default="", max_length=64)
+    cf_api_token: str = Field(default="", max_length=200)
+    cf_d1_database_id: str = Field(default="", max_length=64)
+    cf_r2_bucket: str = Field(default="", max_length=64)
+
+
 class IdentityRequest(BaseModel):
     """Per-nail identity text (the predecessor identity.txt format) for hero prompts."""
 

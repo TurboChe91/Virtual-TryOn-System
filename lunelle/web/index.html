@@ -481,6 +481,14 @@ async function manageStyle(styleId){
         <button class="sm quiet" onclick="pickUpload('${styleId}','reference')">${st.reference_image_path?'替换参考图':'上传参考图'}</button>
         <button class="sm quiet" onclick="identifyStyle('${styleId}')">识别十甲身份</button>
       </div>
+      <h3>发布到线上试戴</h3>
+      <div class="flex">
+        <input id="tryonId" placeholder="试戴编号，3 位数字如 001" value="${esc(st.tryon_style_id||'')}"
+               style="width:200px" maxlength="3">
+        <button class="sm quiet" onclick="saveTryonId('${styleId}')">保存编号</button>
+        <button class="sm" onclick="publishStyle('${styleId}')">发布</button>
+        <span class="muted" id="pubState" style="font-size:12.5px"></span>
+      </div>
       <h3>十甲身份</h3>
       <p class="muted" style="font-size:12.5px; margin:0 0 8px">逐指描述设计（nail-01 至 nail-10）；上架主图与自动验收以此为准。</p>
       <textarea id="identityText" style="min-height:200px; font-family:var(--mono); font-size:12px">${esc(st.identity_text || '')}</textarea>
@@ -489,7 +497,34 @@ async function manageStyle(styleId){
         <button class="quiet" onclick="$('#modal').style.display='none'">关闭</button>
       </div>`;
     $('#modal').style.display = 'flex';
+    loadReadiness(styleId);
   } catch(e){ toast(e.message, 5000); }
+}
+async function loadReadiness(styleId){
+  try {
+    const r = await api(`/api/styles/${styleId}/publish-readiness`);
+    const bits = [`可发布 ${r.ready_cells}/16 格`];
+    if (r.excluded_cells.length) bits.push(`${r.excluded_cells.length} 格被验收拦下`);
+    if (!r.cloudflare_configured) bits.push('发布通道未配置');
+    const el = $('#pubState'); if (el) el.textContent = bits.join(' · ');
+  } catch(e){}
+}
+async function saveTryonId(styleId){
+  try {
+    await api(`/api/styles/${styleId}/tryon-id`,
+      {method:'PUT', body: JSON.stringify({tryon_style_id: $('#tryonId').value.trim()})});
+    toast('编号已保存'); loadReadiness(styleId);
+  } catch(e){ toast('保存失败：' + e.message, 6000); }
+}
+async function publishStyle(styleId){
+  if (!confirm('发布到线上试戴 API？将上传试戴图到 R2 并更新 D1 记录。')) return;
+  toast('发布中…', 60000);
+  try {
+    const r = await api(`/api/styles/${styleId}/publish`, {method:'POST', body:'{}'});
+    toast(`已发布 ${r.uploaded_cells.length} 格` +
+      (r.cover_key ? '，含封面' : '') + `；线上 manifest: ${r.manifest_url}`, 10000);
+    loadReadiness(styleId);
+  } catch(e){ toast('发布失败：' + e.message, 9000); }
 }
 async function saveIdentity(styleId){
   try {

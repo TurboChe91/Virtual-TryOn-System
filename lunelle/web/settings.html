@@ -193,6 +193,24 @@
   </div>
 
   <div class="panel">
+    <div class="hd"><h2>试戴发布通道（Cloudflare）</h2>
+      <p class="desc">把验收通过的试戴图发布到线上试戴 API（api.finglow.cn）：图片传入 R2、记录写入 D1。需要一个有 R2 与 D1 写权限的 API Token。</p></div>
+    <div class="bd">
+      <div class="row">
+        <div><label>Account ID</label><input id="cf_account" placeholder="Cloudflare 账户 ID"></div>
+        <div><label>API Token</label><input id="cf_token" type="password" placeholder="留空则保持现有"></div>
+        <div><label>D1 数据库 ID</label><input id="cf_d1" placeholder="tryon-db 的 UUID"></div>
+        <div><label>R2 Bucket</label><input id="cf_bucket" placeholder="tryon-assets"></div>
+      </div>
+      <div class="flex" style="margin-top:14px">
+        <button class="sm" onclick="saveCf()">保存</button>
+        <button class="sm quiet" onclick="testCf()">测试连接</button>
+        <span class="muted" id="cfState" style="font-size:12.5px"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
     <div class="hd"><h2>手模底图</h2>
       <p class="desc">试戴矩阵的姿势与肤色权威，固定 4 肤色 × 4 视角共 16 张；点击任意格上传或替换。建议同一手模、同一机位分别拍四个视角。</p></div>
     <div class="bd"><div class="hm" id="hm"></div></div>
@@ -331,7 +349,38 @@ function uploadCell(tone, view){
   tonePicker.click();
 }
 
-loadProfiles(); loadTones();
+async function loadCf(){
+  const c = await api('/api/settings/cloudflare');
+  $('#cf_account').value = c.cf_account_id || '';
+  $('#cf_d1').value = c.cf_d1_database_id || '';
+  $('#cf_bucket').value = c.cf_r2_bucket || '';
+  $('#cfState').textContent = c.configured
+    ? '已配置' + (c.cf_api_token.set ? '（Token #' + c.cf_api_token.fingerprint + '）' : '')
+    : '未配置';
+}
+async function saveCf(){
+  const body = {
+    cf_account_id: $('#cf_account').value.trim(),
+    cf_api_token: $('#cf_token').value.trim(),
+    cf_d1_database_id: $('#cf_d1').value.trim(),
+    cf_r2_bucket: $('#cf_bucket').value.trim(),
+  };
+  try {
+    await api('/api/settings/cloudflare', {method:'POST', body: JSON.stringify(body)});
+    $('#cf_token').value = '';
+    toast('已保存'); loadCf();
+  } catch(e){ toast('保存失败：' + e.message, 6000); }
+}
+async function testCf(){
+  toast('测试中…', 15000);
+  try {
+    const r = await api('/api/settings/cloudflare/test', {method:'POST', body:'{}'});
+    if (r.ok) toast('连通正常：D1 表 ' + (r.d1.tables||[]).join('、') + '，R2 可访问', 8000);
+    else toast('测试未通过：D1 ' + (r.d1.ok?'正常':'失败') + '，R2 ' + (r.r2.ok?'正常':'失败'), 9000);
+  } catch(e){ toast('测试失败：' + e.message, 7000); }
+}
+
+loadProfiles(); loadTones(); loadCf();
 </script>
 </body>
 </html>
