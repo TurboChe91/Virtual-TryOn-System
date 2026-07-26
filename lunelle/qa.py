@@ -121,20 +121,40 @@ def _spans(profile: list[int], cutoff: float, min_width: int, max_gap: int) -> l
 
 
 def detect_grid_layout(path: Path) -> dict:
-    """Detect the 2x5 nail arrangement via projection profiles."""
+    """Detect the 2x5 nail arrangement via projection profiles.
+
+    Tightly packed product shots leave only shallow valleys between adjacent
+    nails, so a single absolute cutoff under-segments (real case: 5 long
+    coffin nails merged into one span). We sweep several cutoff levels —
+    absolute (predecessor default) plus fractions of the profile peak — and
+    keep the segmentation with the most plausible column/row count.
+    """
     image = _load_scaled(path)
     mask, w, h = _foreground_mask(image)
 
     col_profile = [sum(1 for y in range(h) if mask[y][x]) for x in range(w)]
     row_profile = [sum(mask[y]) for y in range(h)]
 
-    columns = _spans(
-        col_profile, cutoff=max(2.0, h * 0.035), min_width=max(4, int(w * 0.025)),
-        max_gap=max(3, int(w * 0.012)),
+    def best_spans(profile: list[int], base_cutoff: float, min_width: int,
+                   max_gap: int, expected: int, hard_cap: int) -> list[tuple[int, int]]:
+        peak = max(profile) if profile else 0
+        candidates = [base_cutoff] + [peak * f for f in (0.15, 0.3, 0.5, 0.7)]
+        best: list[tuple[int, int]] = []
+        for cutoff in candidates:
+            spans = _spans(profile, cutoff=cutoff, min_width=min_width, max_gap=max_gap)
+            if len(spans) > hard_cap:  # over-segmented noise, not nails
+                continue
+            if len(best) == 0 or abs(len(spans) - expected) < abs(len(best) - expected):
+                best = spans
+        return best
+
+    columns = best_spans(
+        col_profile, base_cutoff=max(2.0, h * 0.035), min_width=max(4, int(w * 0.025)),
+        max_gap=max(2, int(w * 0.006)), expected=5, hard_cap=8,
     )
-    rows = _spans(
-        row_profile, cutoff=max(2.0, w * 0.025), min_width=max(4, int(h * 0.08)),
-        max_gap=max(3, int(h * 0.02)),
+    rows = best_spans(
+        row_profile, base_cutoff=max(2.0, w * 0.025), min_width=max(4, int(h * 0.08)),
+        max_gap=max(2, int(h * 0.01)), expected=2, hard_cap=4,
     )
     return {
         "detected_columns": len(columns),

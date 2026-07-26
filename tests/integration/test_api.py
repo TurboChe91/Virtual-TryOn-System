@@ -131,8 +131,10 @@ class TestGenerationApi:
 
         # detail + image + qa
         task_id = grids[0]["task_id"]
+        from lunelle.prompts import PROMPT_VERSION
+
         detail = client.get(f"/api/tasks/{task_id}").json()
-        assert detail["prompt_version"] == "pv-1"
+        assert detail["prompt_version"] == PROMPT_VERSION
         assert detail["attempts"] and detail["qa"] is not None
         image = client.get(f"/api/tasks/{task_id}/image")
         assert image.status_code == 200

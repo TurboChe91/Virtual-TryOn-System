@@ -96,6 +96,7 @@ class Config:
 
     qa_min_side: int
     max_upload_mb: int
+    disable_provider_watermark: bool
 
     pricing_usd: dict[str, float] = field(default_factory=dict)
 
@@ -221,6 +222,7 @@ def load_config(dotenv_path: str | os.PathLike | None = None) -> Config:
         retry_backoff_base_s=_env_int("LUNELLE_RETRY_BACKOFF_BASE_S", 15, 1, 3600),
         request_timeout_s=_env_int("LUNELLE_REQUEST_TIMEOUT_S", 300, 10, 1800),
         qa_min_side=_env_int("LUNELLE_QA_MIN_SIDE", 1024, 64, 8192),
+        disable_provider_watermark=_env("LUNELLE_DISABLE_PROVIDER_WATERMARK", "1") == "1",
         max_upload_mb=_env_int("LUNELLE_MAX_UPLOAD_MB", 10, 1, 100),
         pricing_usd=pricing,
     )

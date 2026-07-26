@@ -35,10 +35,18 @@ class OpenAICompatSettings:
     api_key: str
     timeout_s: int
     reference_mode: str  # auto | seedream | openai-edits | off
+    disable_watermark: bool = True
 
 
 def _classify_http(status: int, body_text: str) -> ProviderError:
     snippet = redact(body_text[:600])
+    lowered_body = body_text.lower()
+    # Some aggregators report unknown models as 5xx; retrying cannot help.
+    if any(marker in lowered_body for marker in ("model_not_found", "invalid model", "unknown model")):
+        return ProviderError(
+            "config_error", f"model not available at provider (HTTP {status}): {snippet}",
+            retryable=False, http_status=status,
+        )
     if status in (401, 403):
         return ProviderError(
             "auth_invalid", f"provider rejected credentials (HTTP {status}): {snippet}",
@@ -150,6 +158,8 @@ class OpenAICompatProvider(ImageProvider):
         }
         if include_reference:
             body["image"] = [_data_url(p) for p in request.reference_images]
+        if self.settings.disable_watermark and request.model.startswith("doubao-seedream"):
+            body["watermark"] = False  # Volcano Ark param; ignored by other providers
         response = self._post(f"{self.settings.base_url}/images/generations", json_body=body)
         return self._parse_response(response, request, reference_used=include_reference)
 

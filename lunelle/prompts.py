@@ -22,7 +22,9 @@ from dataclasses import dataclass
 from .models import OUTPUT_GRID, OUTPUT_WEARING
 from .schemas import StyleSpec
 
-PROMPT_VERSION = "pv-1"
+# pv-2: dropped the quoted style name from the identity block — the model
+#        occasionally typeset it as a title inside the image (no-text violation).
+PROMPT_VERSION = "pv-2"
 
 SKIN_TONE_PHRASES = {
     "light": "light skin tone",
@@ -55,8 +57,9 @@ def _join(items: list[str]) -> str:
 
 def build_identity_block(spec: StyleSpec) -> str:
     """The set identity — the single source of design truth in both prompts."""
+    # Never mention the style's display name here: quoted names get typeset
+    # into the image as a title (observed with Seedream 4.5, task tk_237dd10fd4).
     lines = [
-        f'Style name: "{spec.name}".',
         f"Base colors: {_join(spec.base_colors)}.",
     ]
     if spec.accent_colors:

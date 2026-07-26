@@ -43,6 +43,7 @@ def make_config(tmp_path: Path, **overrides) -> Config:
         request_timeout_s=30,
         qa_min_side=256,
         max_upload_mb=2,
+        disable_provider_watermark=True,
         pricing_usd=dict(DEFAULT_PRICING_USD),
     )
     defaults.update(overrides)

@@ -34,6 +34,7 @@ def build_provider(config: Config) -> ImageProvider:
             api_key=config.image_api_key,
             timeout_s=config.request_timeout_s,
             reference_mode=config.reference_mode,
+            disable_watermark=config.disable_provider_watermark,
         )
     )
 
