@@ -241,9 +241,34 @@ regen → correct → regen 可以无限交替。已用一个复刻旧逻辑的�
 `LUNELLE_AUTO_REGEN_MAX` 保留其文档语义作为**总开关**（0 = 完全禁用自动工作），
 但「允许多少」不再由它决定，而是共享的 `LUNELLE_MAX_LINEAGE_DESCENDANTS`。
 
-### 第三阶段 快照与版本冻结
-迁移 0006、`tasks.py`（input_fingerprint、lineage、依赖失败传播）、`publish.py`
-（原子化 + 版本化 key）、`export.py`
+### 第三阶段 快照与版本冻结（已实施，迁移 0007–0009）
+
+| 项 | 实现 | 验证 |
+|---|---|---|
+| 1. 不可变输入快照 | `task_snapshots`：spec/身份文本**复制而非引用**、提示词、合同内容哈希、通道身份与密钥指纹（绝不含密钥）、全部输入资产按 digest；与任务插入同事务 | `test_snapshot_copies_the_spec_rather_than_pointing_at_it`、`test_snapshot_never_contains_the_api_key` |
+| 2. 资产版本冻结 | 内容寻址存储 `assets/{digest[:2]}/{digest}{ext}`，文件名即哈希，**覆盖在构造上不可能**；手模上传改走此路径 | `test_hand_model_reupload_cannot_change_a_past_snapshot`（端到端） |
+| 3. input_fingerprint | 规范化结构的 sha256；排除 task_id/时间戳/batch/note（否则每个任务都唯一、指纹无意义） | `test_confirm...`、`test_fingerprint_excludes_task_identity_and_timestamps`、`GET /api/fingerprints/{fp}` |
+| 4. 依赖失败传播 | 依赖必须 **success** 而非「不再活跃」；终态失败/取消时递归失败依赖方为 `dependency_failed`；依赖修好后自动复活 | `test_failed_dependency_fails_the_dependent_without_spending`（`provider.calls == 0`）、传递性、复活、复活不误伤 |
+| 5. 返修 lineage | `parent_task_id` / `lineage_depth` / `lineage_reason` 列；`/lineage` 返回祖先链与后代 | `test_chain_depth_increments_down_the_repair_chain`（1→2→3）、`test_ancestors_walk_back_to_the_root` |
+| 6. 版本化原子发布 | R2 键带版本永不覆盖（另写约定键供静态端点）；D1 改为**逐格 upsert** 而非先 DELETE 再 INSERT；`publish_versions` 台账记录意图与进度 | `test_no_blanket_delete_before_the_upserts`、`test_plan_is_recorded_before_any_remote_call`、`test_rerunning_after_a_failure_completes_the_publish` |
+
+**发布为何在没有分布式事务的情况下也是安全的**（`publish.py` 模块注释有完整说明）：
+R2 先写、D1 后写且逐格 upsert（单条语句即原子），版本化键永不覆盖，意图在第一次
+远程调用**之前**就落台账。因此最坏的中间态是「manifest 里混着新旧两个版本、但每一行
+都指向存在的对象」，而不是旧代码那种「DELETE 成功、INSERT 失败 → manifest 空」。
+D1 的 REST 端点文档说多语句请求按 batch 执行（会给到真正的原子性），但 `params` 在多
+语句下如何绑定我无法在没有真实库的情况下验证，所以**设计不依赖它**。
+
+**一处受 Worker 契约约束的设计**：`/api/tryon/result` 自己按约定拼 R2 键，纯版本化键
+会让它 404，所以每格写两个键（版本化给 manifest、约定键给静态端点）。存储成本可忽略，
+换来的是 manifest 立即刷新而不受 Worker 一年 immutable 缓存影响。
+
+**行为变更（需要知晓）**：与 grid 同批排队的 wearing 任务，过去在 grid 失败时会
+以纯文本模式继续并**成功**——一张付费但无法保证与 grid 一致的图，且不看日志无法与
+正常图区分。有两个测试把这个行为当作「independence rule」断言，那是缺陷，现已反向断言。
+
+### 第三阶段原始计划（已完成）
+迁移 0007–0009、`assets.py`、`snapshots.py`、`tasks.py`、`publish.py`
 
 ### 第四阶段 Nail Slot System
 新增 `lunelle/nailslots.py`（Manifest/Label/Mask 派生与校验）、

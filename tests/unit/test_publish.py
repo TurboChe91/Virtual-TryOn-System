@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from PIL import Image
 
+from lunelle.cloudflare import CloudflareError
 from lunelle.providers.mock import MockImageProvider
 from lunelle.publish import (
     VIEW_CODE,
@@ -17,16 +18,33 @@ from tests.integration.test_worker_flows import make_style, run_worker_until_set
 
 
 class FakeClient:
-    def __init__(self):
+    """Stands in for Cloudflare, and models enough of D1 to answer SELECTs.
+
+    The publish flow reads back existing asset rows to find stale ones, so a fake
+    that always returns [] would never exercise the cleanup path.
+    """
+
+    def __init__(self, existing_rows: list[dict] | None = None,
+                 fail_on: str | None = None):
         self.uploads: list[tuple[str, str]] = []
         self.queries: list[tuple[str, list]] = []
+        self.rows: list[dict] = list(existing_rows or [])
+        #: Substring of the SQL (or R2 key) that should raise, to simulate a
+        #: partial publish.
+        self.fail_on = fail_on
 
     def r2_put(self, key, data, content_type):
         assert data[:4] == b"RIFF" and b"WEBP" in data[:16]  # really webp
+        if self.fail_on and self.fail_on in key:
+            raise CloudflareError(f"simulated R2 failure for {key}")
         self.uploads.append((key, content_type))
 
     def d1_query(self, sql, params=None):
+        if self.fail_on and self.fail_on in sql:
+            raise CloudflareError("simulated D1 failure")
         self.queries.append((sql, params or []))
+        if sql.strip().upper().startswith("SELECT"):
+            return list(self.rows)
         return []
 
 
@@ -144,19 +162,30 @@ class TestPublish:
         out = publish_style(db, service, client, style["style_id"])
 
         keys = [k for k, _ in client.uploads]
+        # Both keys per cell: versioned for the manifest (immune to the Worker's
+        # year-long immutable cache) and conventional for /api/tryon/result, which
+        # builds its key by convention and would 404 on a versioned one.
+        assert "tryon/results/007-light-01-v1.webp" in keys
         assert "tryon/results/007-light-01.webp" in keys
+        assert "tryon/results/007-deep-04-v1.webp" in keys
         assert "tryon/results/007-deep-04.webp" in keys
         assert "tryon/icons/007-light-icon.webp" in keys
         assert "tryon/plans/007-plan.webp" in keys
         assert len(out["uploaded_cells"]) == 4
+        assert out["version"] == 1
         assert out["manifest_url"].endswith("/v1/styles/007")
 
         sql_all = " ".join(sql for sql, _ in client.queries)
         assert "INSERT INTO tryon_styles" in sql_all
-        assert "DELETE FROM tryon_assets" in sql_all
-        insert_assets = [p for sql, p in client.queries if "INSERT INTO tryon_assets" in sql]
-        assert len(insert_assets) == 4
-        assert all(p[0].startswith("007-") for p in insert_assets)
+        # No blanket DELETE: it used to run before the INSERTs, so a failure in
+        # between left the customer-facing manifest empty.
+        assert "DELETE FROM tryon_assets WHERE style_id" not in sql_all
+        upserts = [p for sql, p in client.queries
+                   if "INSERT INTO tryon_assets" in sql and "ON CONFLICT" in sql]
+        assert len(upserts) == 4
+        assert all(p[0].startswith("007-") for p in upserts)
+        # The manifest points at the versioned key.
+        assert all("-v1.webp" in p[4] for p in upserts)
 
         # Everything that reached production is stamped published.
         for cell in out["uploaded_cells"]:

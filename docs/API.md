@@ -41,6 +41,8 @@ Base URL: `http://<host>:8300`。写操作在设置 `LUNELLE_ADMIN_TOKEN` 后需
 `GET /api/tasks/{task_id}/image` — 成品图（PNG）。
 
 `POST /api/tasks/{task_id}/retry` — 手动重试，仅 failed/cancelled，409 其他状态。
+被依赖任务重试成功后，仅因 `dependency_failed` 而失败的下游任务会**自动重新排队**
+（因自身原因失败的不受影响——上游成功并不说明它没问题）。
 `POST /api/tasks/{task_id}/cancel` — 取消，仅 pending/retrying。
 `POST /api/tasks/{task_id}/qa` — 对成功任务重跑质检。**重跑会重开人工复核**
 （`review_state` 回到 `waiting_human_review`），因为原批准是针对旧判定给出的。
@@ -48,6 +50,30 @@ Base URL: `http://<host>:8300`。写操作在设置 `LUNELLE_ADMIN_TOKEN` 后需
 `{approved: bool, note?, reviewer?}`。返回 `{qa_state, review_state, needs_human_review}`。
 409 `qa_not_ready`=自动质检尚未完成（不是错误，稍后重试即可）；
 409 `no QA result exists`=质检未产生结果，需先重跑 `/qa`。
+
+### 溯源与血缘（v7–v9 起）
+
+`GET /api/tasks/{task_id}/snapshot` — 该任务的**冻结输入**与每次尝试的实发内容。
+需要管理员（含完整提示词与通道身份）。返回 `input_fingerprint`、`snapshot`
+（spec/身份文本的副本、提示词、合同哈希、通道与密钥指纹、按 digest 记录的输入资产）、
+以及 `executions`（每次尝试实际解析到的资产与提示词哈希）。
+
+计划与实发**分开记录**，因为两者会合法地不一致：参考图在执行时缺失会导致提示词的
+参考段被剥离，那么真正发给供应商的就不是计划的内容。查问题要看实发，复现要看计划。
+
+快照之前创建的任务返回 `available: false`——**不会**合成一份快照，因为伪造的快照与
+真实快照无法区分，而它只是猜测。
+
+`GET /api/fingerprints/{fingerprint}` — 输入完全相同的所有任务（可复现性检查）。
+64 位小写十六进制，否则 422。
+
+`GET /api/tasks/{task_id}/lineage` — 共享自动工作预算 + `ancestors`（由近及远的祖先链）
++ `descendants`。任务上另有 `parent_task_id` / `lineage_depth` / `lineage_reason`。
+
+`GET /api/styles/{style_id}/publish-history` — 该款式的每次发布尝试（含未完成的，
+带停在哪一步的状态）。
+`GET /api/publishes/unfinished` — 从未到达 `committed` 的发布积压。重跑该款式的
+publish 即可补齐：R2 键带版本永不覆盖、D1 行按稳定 id upsert，所以重跑是幂等的。
 
 ### 状态字段（v5 起）
 
@@ -146,7 +172,8 @@ database / bucket ID 本身就指向生产基础设施。
 `POST /api/settings/cloudflare/test` — 只读探测 D1 与 R2 绑定。
 
 `GET /api/settings/hand-models` / `POST /api/settings/hand-models/{tone}/{view}`
-— 手模底图（4 肤色 × 4 视角）。缺失时矩阵任务以 `dependency_missing` 阻塞，
+— 手模底图（4 肤色 × 4 视角）。上传走内容寻址存储，因此**重新上传不会覆盖**旧字节，
+过往任务的快照与其输入保持一致。缺失时矩阵任务以 `dependency_missing` 阻塞，
 不会静默降级。
 
 ## CLI 对照

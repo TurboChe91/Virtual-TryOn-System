@@ -1259,14 +1259,21 @@ class TaskService:
                 (new_state, utcnow(), task_id, row["review_state"]),
             )
 
-    def mark_published(self, task_id: str) -> None:
-        """Record that an asset reached production.
+    def mark_published(self, task_id: str, *, version: int | None = None) -> None:
+        """Record that an asset reached production, and in which publish version.
 
         `publish_ready` is a system-derived state, never settable by a human, so
         it is passed through here on the way to `published` rather than being
         exposed as something a reviewer can declare.
         """
         task = self.get_task(task_id, with_details=False)
+        if version is not None:
+            conn = self.db.conn()
+            with transaction(conn):
+                conn.execute(
+                    "UPDATE tasks SET published_version = ?, updated_at = ?"
+                    " WHERE task_id = ?", (version, utcnow(), task_id),
+                )
         if task["review_state"] == REVIEW_PUBLISHED:
             return
         if task["review_state"] == REVIEW_APPROVED:

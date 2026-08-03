@@ -436,6 +436,35 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         except CloudflareError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    @app.get("/api/styles/{style_id}/publish-history",
+             dependencies=[Depends(require_admin)])
+    def publish_history_endpoint(style_id: str, request: Request):
+        """Every publish attempt for this style, newest first.
+
+        Unfinished attempts stay visible with the state they stopped at, because a
+        half-finished publish that nobody can see is the failure mode this ledger
+        exists to remove.
+        """
+        from .publish import publish_history
+
+        service: TaskService = request.app.state.service
+        service.get_style(style_id)  # 404 if missing
+        return {"style_id": style_id,
+                "publishes": publish_history(request.app.state.db, style_id)}
+
+    @app.get("/api/publishes/unfinished", dependencies=[Depends(require_admin)])
+    def unfinished_publishes_endpoint(request: Request):
+        """Publishes that never reached `committed` — the operator's backlog.
+
+        Re-running publish for the style completes them: R2 keys are versioned so
+        they never overwrite, and D1 rows upsert on a stable id, so a re-run is
+        idempotent rather than merely hopeful.
+        """
+        from .publish import unfinished_publishes
+
+        rows = unfinished_publishes(request.app.state.db)
+        return {"count": len(rows), "publishes": rows}
+
     # ---------------- Cloudflare publish channel settings ----------------
 
     @app.get("/api/settings/cloudflare", dependencies=[Depends(require_admin)])
