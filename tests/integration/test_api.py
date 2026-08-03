@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from lunelle.server import create_app
-from tests.conftest import make_config
+from tests.conftest import approve_all_via_api, make_config
 
 
 @pytest.fixture
@@ -152,7 +152,12 @@ class TestGenerationApi:
                             json={"output_types": ["grid", "wearing"]}).json()
         assert not again["created"] and len(again["skipped"]) == 2
 
-        # export
+        # export is default-deny: unreviewed assets are not shippable
+        blocked = client.post("/api/export", json={})
+        assert blocked.status_code == 422
+
+        # after human approval the same export succeeds
+        approve_all_via_api(client, expect=2)
         export = client.post("/api/export", json={}).json()
         assert export["item_count"] == 1
 

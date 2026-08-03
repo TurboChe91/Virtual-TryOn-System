@@ -155,8 +155,11 @@ class RetryRequest(BaseModel):
 
 class ReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    approved: bool = Field(..., description="true clears needs_human_review on the latest QA result")
+    approved: bool = Field(...,
+                           description="true records human approval (review_state=approved)")
     note: str = Field(default="", max_length=300)
+    reviewer: str = Field(default="", max_length=120,
+                          description="who reviewed; defaults to the caller's identity")
 
 
 class MatrixRequest(BaseModel):
@@ -220,7 +223,7 @@ class ProfileUpdateRequest(BaseModel):
 class ExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     skus: list[str] = Field(default_factory=list, description="empty = all exportable styles")
-    include_unreviewed: bool = Field(
-        default=True,
-        description="include assets whose QA needs human review (flagged in the report)",
-    )
+    # `include_unreviewed` was removed deliberately (breaking change): export is
+    # default-deny now, so there is no supported way to ship an unreviewed asset.
+    # extra="forbid" makes an old client sending it fail loudly instead of
+    # silently getting the opposite of what it asked for.

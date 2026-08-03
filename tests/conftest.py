@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -70,3 +71,68 @@ def db(config):
 @pytest.fixture
 def service(db, config):
     return TaskService(db, config)
+
+
+def approve_all_via_api(client, *, expect: int | None = None) -> list[dict]:
+    """Approve every successful task through the API, waiting for QA to land.
+
+    Export and publish are default-deny, so any test that wants an asset to ship
+    has to approve it the way an operator would. Waiting on qa_state (rather than
+    just status) is the whole point of the state column: `success` no longer
+    implies a QA verdict exists.
+    """
+    deadline = time.time() + 30.0
+    while time.time() < deadline:
+        tasks = [t for t in client.get("/api/tasks").json()["tasks"]
+                 if t["status"] == "success"]
+        if tasks and all(t["qa_state"] not in ("pending", "running") for t in tasks):
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("QA did not settle for successful tasks")
+
+    approved = []
+    for task in tasks:
+        response = client.post(f"/api/tasks/{task['task_id']}/review",
+                               json={"approved": True, "note": "test approval"})
+        assert response.status_code == 200, response.text
+        approved.append(response.json())
+    if expect is not None:
+        assert len(approved) == expect, f"approved {len(approved)}, expected {expect}"
+    return approved
+
+
+def write_test_image(path: Path, size=(64, 64), color=(200, 170, 150)) -> Path:
+    """A real decodable image on disk, for dependency-satisfaction fixtures."""
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, color).save(path)
+    return path
+
+
+def satisfy_matrix_dependencies(db, config, service, style_id: str,
+                                tones=("light", "medium", "tan", "deep"),
+                                views=("p2_open_hands", "p3_right_hand",
+                                       "p4_thumb_visible", "p5_left_hand")) -> None:
+    """Give a style the inputs a matrix cell hard-requires: a design authority
+    (plan image) and a hand model per tone+view. Matrix cells now block instead
+    of degrading to a text-only render, so tests of the success path must supply
+    these explicitly.
+    """
+    from lunelle.db import transaction, utcnow
+
+    plan = write_test_image(config.upload_dir / f"plan-{style_id}.png", (256, 256))
+    service.set_plan_image(style_id, plan)
+    conn = db.conn()
+    with transaction(conn):
+        for tone in tones:
+            for view in views:
+                hand = write_test_image(
+                    config.upload_dir / f"hand-{tone}-{view}.png", (256, 256))
+                conn.execute(
+                    "INSERT INTO app_settings (key, value, updated_at) VALUES (?,?,?)"
+                    " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+                    " updated_at = excluded.updated_at",
+                    (f"hand_model_{tone}_{view}", str(hand), utcnow()),
+                )

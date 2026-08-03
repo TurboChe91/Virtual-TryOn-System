@@ -566,18 +566,70 @@ async function loadTasks(){
       t.output_type==='matrix_cell' && t.metadata && t.metadata.tone
         ? ` <span class="mono muted" style="font-size:11px">${esc(TONE_LABEL[t.metadata.tone]||t.metadata.tone)}·${esc(VIEW_LABEL[t.metadata.view]||t.metadata.view)}</span>` : ''}</td>
     <td><span class="st ${esc(t.status)}">${esc(ST_LABEL[t.status]||t.status)}</span>${
-      t.error_code?` <span class="mono muted" style="font-size:11px">${esc(t.error_code)}</span>`:''}</td>
+      t.error_code?` <span class="mono muted" style="font-size:11px">${esc(t.error_code)}</span>`:''}${
+      t.status==='success'
+        ? `<br><span class="mono muted" style="font-size:11px">${esc(REVIEW_LABEL[t.review_state]||t.review_state)}</span>`
+        : ''}</td>
     <td class="mono muted">${esc((t.created_at||'').replace('T',' ').replace('Z','').slice(5,16))}</td>
     <td style="text-align:right; white-space:nowrap">
-      <button class="sm link" onclick="showTask('${t.task_id}')">${t.status==='success'?'查看':'详情'}</button>
+      <button class="sm link" onclick="showTask('${t.task_id}')">${
+        t.status==='success' && t.review_state==='waiting_human_review' ? '待审核' :
+        t.status==='success' ? '查看' : '详情'}</button>
       ${t.status==='failed'||t.status==='cancelled'
         ? `<button class="sm link" onclick="retryTask('${t.task_id}')">重试</button>` : ''}
     </td></tr>`).join('') || '<tr><td colspan="5" class="muted" style="padding:26px 18px">暂无任务</td></tr>';
 }
 async function reviewTask(id, approved){
   try { await api(`/api/tasks/${id}/review`, {method:'POST', body: JSON.stringify({approved})});
-    toast(approved ? '已确认可用' : '已标记不合格'); showTask(id); }
+    toast(approved ? '已确认可用' : '已标记不合格'); showTask(id); loadTasks(); }
   catch(e){ toast('操作失败：' + e.message, 6000); }
+}
+// Review panel:导出与发布默认拒绝，只有人工「确认可用」的素材才能出厂，
+// 所以这里必须明确区分「自动检查」与「人工审核」两件事。
+const REVIEW_LABEL = {
+  generated: '等待自动检查', waiting_human_review: '等待人工审核',
+  approved: '人工已确认', rejected: '人工已否决',
+  publish_ready: '可发布', published: '已发布上线',
+};
+function renderReviewPanel(t){
+  if (t.qa_state === 'pending' || t.qa_state === 'running')
+    return `<h3>自动检查进行中</h3><p class="muted" style="font-size:12.5px">
+      检查结果落库后才能进行人工审核。</p>`;
+  if (t.qa_state === 'error' || !t.qa)
+    return `<h3>自动检查未产生结果</h3>
+      <p class="muted" style="font-size:12.5px">该素材不可导出、不可发布。请先重跑检查。</p>
+      <button class="sm quiet" onclick="rerunQa('${t.task_id}')">重跑自动检查</button>`;
+
+  const advisory = t.qa_advisory ? `<p class="muted" style="font-size:12px; margin:8px 0 0">
+    AI 复核建议：${t.qa_advisory.passed ? '通过' : '不通过'}（仅供参考，不能替代人工审核）</p>` : '';
+  const auto = t.qa.passed
+    ? `<h3>自动检查已通过 · ${esc(REVIEW_LABEL[t.review_state] || t.review_state)}</h3>`
+    : `<h3>自动检查发现问题 · ${esc(REVIEW_LABEL[t.review_state] || t.review_state)}</h3>
+       ${t.qa.issues.length?`<pre>${esc(JSON.stringify(t.qa.issues, null, 2))}</pre>`:''}`;
+
+  let actions;
+  if (t.review_state === 'approved' || t.review_state === 'publish_ready') {
+    actions = `<div class="flex"><span class="muted" style="font-size:12.5px">已可出厂。如实物不符可</span>
+      <button class="sm link" onclick="reviewTask('${t.task_id}',false)">撤回并标记不合格</button></div>`;
+  } else if (t.review_state === 'published') {
+    actions = `<div class="flex"><span class="muted" style="font-size:12.5px">已发布至线上。如需下架可</span>
+      <button class="sm link" onclick="reviewTask('${t.task_id}',false)">标记不合格</button></div>`;
+  } else if (t.review_state === 'rejected') {
+    actions = `<div class="flex"><span class="muted" style="font-size:12.5px">已否决，不会被导出或发布。</span>
+      <button class="sm link" onclick="reviewTask('${t.task_id}',true)">改判为可用</button></div>`;
+  } else {
+    actions = `<div class="flex">
+      <button class="sm" onclick="reviewTask('${t.task_id}',true)">确认可用（准许出厂）</button>
+      <button class="sm link" onclick="reviewTask('${t.task_id}',false)">标记不合格</button></div>`;
+  }
+  const stamp = t.reviewed_at ? `<p class="mono muted" style="font-size:11px; margin:6px 0 0">
+    审核于 ${esc(t.reviewed_at)}</p>` : '';
+  return auto + advisory + actions + stamp;
+}
+async function rerunQa(id){
+  try { await api(`/api/tasks/${id}/qa`, {method:'POST', body:'{}'});
+    toast('自动检查已重跑'); showTask(id); }
+  catch(e){ toast('重跑失败：' + e.message, 6000); }
 }
 async function retryTask(id){
   try { await api(`/api/tasks/${id}/retry`, {method:'POST', body:'{}'}); toast('已重新排队'); loadTasks(); }
@@ -587,15 +639,7 @@ async function showTask(id){
   try {
     const t = await api('/api/tasks/' + id);
     const ver = t.metadata && t.metadata.version ? t.metadata.version : 1;
-    const qa = t.qa ? (t.qa.passed
-      ? `<h3>自动检查已通过</h3>
-         <div class="flex"><span class="muted" style="font-size:12.5px">如实物不符可</span>
-         <button class="sm link" onclick="reviewTask('${t.task_id}',false)">标记不合格</button></div>`
-      : `<h3>自动检查发现问题</h3>
-         ${t.qa.issues.length?`<pre>${esc(JSON.stringify(t.qa.issues, null, 2))}</pre>`:''}
-         <div class="flex">
-           <button class="sm quiet" onclick="reviewTask('${t.task_id}',true)">人工判定可用</button>
-         </div>`) : '';
+    const qa = t.status === 'success' ? renderReviewPanel(t) : '';
     const img = t.status==='success' ? `<img class="preview" src="/api/tasks/${id}/image">` : '';
     const correctForm = t.status==='success' ? `
       <h3>提交修正（将创建 v${ver+1}，锁定本版为底图的局部编辑）</h3>
@@ -637,8 +681,13 @@ async function correctTask(id){
 async function doExport(){
   try {
     const out = await api('/api/export', {method:'POST', body: JSON.stringify({})});
-    toast(`已导出 ${out.item_count} 个款式 → ${out.export_dir}`, 8000);
-  } catch(e){ toast('导出失败：' + e.message, 6000); }
+    let message = `已导出 ${out.item_count} 个款式 → ${out.export_dir}`;
+    // Default-deny surprises operators unless the reason is spelled out.
+    if (out.skipped && out.skipped.length)
+      message += `；跳过 ${out.skipped.length} 个：` +
+        out.skipped.slice(0,3).map(s => `${s.sku}（${s.reason}）`).join('、');
+    toast(message, 9000);
+  } catch(e){ toast('导出失败：' + e.message + '（导出默认只接受人工已确认的素材）', 9000); }
 }
 
 function refreshAll(){ loadStyles(); loadTasks(); loadMetrics(); }

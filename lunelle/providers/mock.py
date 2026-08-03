@@ -10,10 +10,33 @@ from __future__ import annotations
 
 import hashlib
 import io
+import random
+from typing import cast
 
 from PIL import Image, ImageDraw
 
 from .base import GenerationRequest, GenerationResult, ImageProvider, ProviderError
+
+#: Peak-to-peak grain amplitude. Must stay below qa.FOREGROUND_THRESHOLD (24) so
+#: grain is never mistaken for image content by the projection-profile counter.
+GRAIN_AMPLITUDE = 8
+
+
+def _add_grain(image: Image.Image, seed: int) -> None:
+    """Deterministic per-pixel noise, in place. Same seed => same bytes."""
+    rng = random.Random(seed)  # noqa: S311 - test-image texture, not cryptography
+    pixels = image.load()
+    assert pixels is not None
+    width, height = image.size
+    for y in range(height):
+        for x in range(width):
+            r, g, b = cast("tuple[int, int, int]", pixels[x, y])
+            jitter = rng.randint(-GRAIN_AMPLITUDE, GRAIN_AMPLITUDE)
+            pixels[x, y] = (
+                min(255, max(0, r + jitter)),
+                min(255, max(0, g + jitter)),
+                min(255, max(0, b + jitter)),
+            )
 
 
 class MockImageProvider(ImageProvider):
@@ -29,6 +52,11 @@ class MockImageProvider(ImageProvider):
         self._fail_with = fail_with
         self._fail_times = fail_times
         self._calls = 0
+
+    @property
+    def calls(self) -> int:
+        """Provider calls made so far — lets tests assert a fail-fast path spent nothing."""
+        return self._calls
 
     def generate(self, request: GenerationRequest) -> GenerationResult:
         self._calls += 1
@@ -61,6 +89,13 @@ class MockImageProvider(ImageProvider):
                 draw.ellipse([fx - 14, cy - height // 3, fx + 14, cy - height // 8],
                              fill=(224, 188, 160))
                 draw.ellipse([fx - 12, cy - height // 3, fx + 12, cy - height // 4], fill=color)
+
+        # Flat synthetic fills compress to ~3KB, below QA's 30KB floor (which
+        # exists to catch truncated real downloads). Add deterministic
+        # low-amplitude noise so the render is byte-realistic enough to pass
+        # heuristic QA: the amplitude stays under the foreground threshold, so
+        # nail-counting and dominant-colour checks see exactly the same shapes.
+        _add_grain(image, seed)
 
         buf = io.BytesIO()
         image.save(buf, format="PNG")

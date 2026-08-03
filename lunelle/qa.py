@@ -328,25 +328,38 @@ def _finalize(output_type: str, checks: dict, issues: list[str], *, hard_fail: b
     }
 
 
-def store_qa_result(db: Database, task_id: str, qa_doc: dict) -> None:
+def insert_qa_result(conn, task_id: str, qa_doc: dict, *,
+                     source: str = "heuristic") -> None:
+    """Insert one QA row inside the caller's transaction.
+
+    `source` separates the heuristic verdict (the only one the publish/export
+    gate consults) from advisory LLM verdicts and manual entries.
+    """
+    conn.execute(
+        "INSERT INTO qa_results (task_id, passed, score, issues_json, checks_json,"
+        " recommended_action, needs_human_review, source, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            task_id,
+            1 if qa_doc["passed"] else 0,
+            qa_doc["score"],
+            json.dumps(qa_doc["issues"], ensure_ascii=False),
+            json.dumps(
+                {"checks": qa_doc["checks"],
+                 # Optional: LLM-gate verdicts and external callers don't carry it.
+                 "manual_review_items": qa_doc.get("manual_review_items", [])},
+                ensure_ascii=False,
+            ),
+            qa_doc["recommended_action"],
+            1 if qa_doc["needs_human_review"] else 0,
+            source,
+            utcnow(),
+        ),
+    )
+
+
+def store_qa_result(db: Database, task_id: str, qa_doc: dict, *,
+                    source: str = "heuristic") -> None:
     conn = db.conn()
     with transaction(conn):
-        conn.execute(
-            "INSERT INTO qa_results (task_id, passed, score, issues_json, checks_json,"
-            " recommended_action, needs_human_review, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (
-                task_id,
-                1 if qa_doc["passed"] else 0,
-                qa_doc["score"],
-                json.dumps(qa_doc["issues"], ensure_ascii=False),
-                json.dumps(
-                    {"checks": qa_doc["checks"],
-                     # Optional: LLM-gate verdicts and external callers don't carry it.
-                     "manual_review_items": qa_doc.get("manual_review_items", [])},
-                    ensure_ascii=False,
-                ),
-                qa_doc["recommended_action"],
-                1 if qa_doc["needs_human_review"] else 0,
-                utcnow(),
-            ),
-        )
+        insert_qa_result(conn, task_id, qa_doc, source=source)

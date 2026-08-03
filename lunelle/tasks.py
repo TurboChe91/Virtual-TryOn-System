@@ -25,10 +25,22 @@ from .models import (
     OUTPUT_HERO,
     OUTPUT_WEARING,
     PENDING,
+    QA_DONE,
+    QA_ERROR,
+    QA_NOT_READY,
+    QA_PENDING,
+    QA_STATES,
     RETRYING,
+    REVIEW_APPROVED,
+    REVIEW_GENERATED,
+    REVIEW_PUBLISH_READY,
+    REVIEW_PUBLISHED,
+    REVIEW_REJECTED,
+    REVIEW_WAITING,
     RUNNING,
     SUCCESS,
     IllegalTransition,
+    check_review_transition,
     check_transition,
     new_batch_id,
     new_style_id,
@@ -501,17 +513,26 @@ class TaskService:
             doc["attempts"] = [dict(r) for r in conn.execute(
                 "SELECT * FROM attempts WHERE task_id = ? ORDER BY attempt_no", (task_id,)
             )]
-            qa = conn.execute(
-                "SELECT * FROM qa_results WHERE task_id = ? ORDER BY qa_id DESC LIMIT 1", (task_id,)
-            ).fetchone()
-            if qa is not None:
-                qa_doc = dict(qa)
-                qa_doc["issues"] = json.loads(qa_doc.pop("issues_json"))
-                qa_doc["checks"] = json.loads(qa_doc.pop("checks_json"))
-                doc["qa"] = qa_doc
-            else:
-                doc["qa"] = None
+            # `qa` is the gate-relevant HEURISTIC verdict; advisory LLM verdicts
+            # are surfaced separately so review and gating can never act on one
+            # by accident (the LLM row is usually the most recent).
+            doc["qa"] = self._latest_qa(conn, task_id, "heuristic")
+            doc["qa_advisory"] = self._latest_qa(conn, task_id, "llm")
         return doc
+
+    @staticmethod
+    def _latest_qa(conn: sqlite3.Connection, task_id: str, source: str) -> dict | None:
+        row = conn.execute(
+            "SELECT * FROM qa_results WHERE task_id = ? AND source = ?"
+            " ORDER BY qa_id DESC LIMIT 1",
+            (task_id, source),
+        ).fetchone()
+        if row is None:
+            return None
+        qa_doc = dict(row)
+        qa_doc["issues"] = json.loads(qa_doc.pop("issues_json"))
+        qa_doc["checks"] = json.loads(qa_doc.pop("checks_json"))
+        return qa_doc
 
     def list_tasks(
         self,
@@ -520,6 +541,8 @@ class TaskService:
         status: str | None = None,
         output_type: str | None = None,
         batch_id: str | None = None,
+        qa_state: str | None = None,
+        review_state: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
@@ -536,12 +559,18 @@ class TaskService:
         if batch_id:
             clauses.append("batch_id = ?")
             params.append(batch_id)
+        if qa_state:
+            clauses.append("qa_state = ?")
+            params.append(qa_state)
+        if review_state:
+            clauses.append("review_state = ?")
+            params.append(review_state)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = self.db.conn().execute(
             f"SELECT task_id, batch_id, style_id, sku, output_type, prompt_version, provider,"  # noqa: S608
             f" model, status, retry_count, max_retries, estimated_cost_usd, actual_cost_usd,"
             f" created_at, started_at, completed_at, updated_at, output_path, error_code,"
-            f" metadata_json"
+            f" qa_state, review_state, reviewed_at, metadata_json"
             f" FROM tasks {where} ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",  # noqa: S608
             (*params, limit, offset),
         ).fetchall()
@@ -675,6 +704,11 @@ class TaskService:
         metadata = task["metadata"]
         if extra_metadata:
             metadata.update(extra_metadata)
+        # qa_state and review_state are written in the SAME transaction as the
+        # success transition. Without this, a caller that sees status=success has
+        # no way to tell "QA not run yet" from "QA found nothing" — that was the
+        # race behind the flaky /review 409. Reordering the QA call alone would
+        # only shrink the window; the explicit state removes it.
         return self.transition(
             task_id,
             SUCCESS,
@@ -684,8 +718,117 @@ class TaskService:
             completed_at=utcnow(),
             error_code=None,
             error_message=None,
+            qa_state=QA_PENDING,
+            review_state=REVIEW_GENERATED,
             metadata_json=json.dumps(metadata, ensure_ascii=False),
         )
+
+    # ---------------- QA / review state ----------------
+
+    def set_qa_state(self, task_id: str, qa_state: str) -> None:
+        """Advance the QA pipeline state (independent of task status)."""
+        if qa_state not in QA_STATES:
+            raise ValueError(f"unknown qa_state {qa_state!r}")
+        conn = self.db.conn()
+        with transaction(conn):
+            conn.execute(
+                "UPDATE tasks SET qa_state = ?, updated_at = ? WHERE task_id = ?",
+                (qa_state, utcnow(), task_id),
+            )
+
+    def finish_qa(self, task_id: str, qa_doc: dict) -> None:
+        """Store the heuristic QA verdict and open human review atomically.
+
+        One transaction so no caller can observe qa_state='done' without the
+        row, or the row without the state.
+        """
+        from .qa import insert_qa_result
+
+        conn = self.db.conn()
+        with transaction(conn):
+            insert_qa_result(conn, task_id, qa_doc, source="heuristic")
+            conn.execute(
+                "UPDATE tasks SET qa_state = ?, review_state = ?, updated_at = ?"
+                " WHERE task_id = ? AND review_state = ?",
+                (QA_DONE, REVIEW_WAITING, utcnow(), task_id, REVIEW_GENERATED),
+            )
+            # A re-run of QA on an already-reviewed asset must not silently keep
+            # the old approval: the verdict it was approved against is gone.
+            conn.execute(
+                "UPDATE tasks SET qa_state = ?, review_state = ?, reviewed_at = NULL,"
+                " reviewed_by = NULL, updated_at = ?"
+                " WHERE task_id = ? AND review_state IN (?, ?, ?, ?)",
+                (QA_DONE, REVIEW_WAITING, utcnow(), task_id,
+                 REVIEW_APPROVED, REVIEW_REJECTED, REVIEW_PUBLISH_READY, REVIEW_PUBLISHED),
+            )
+
+    def record_review(self, task_id: str, *, approved: bool, note: str = "",
+                      reviewer: str = "") -> dict:
+        """Record a human verdict. Requires a landed heuristic QA verdict."""
+        task = self.get_task(task_id)
+        if task["status"] != SUCCESS:
+            raise ConflictError("only successful tasks can be reviewed")
+        if task["qa_state"] in QA_NOT_READY:
+            raise ConflictError(
+                "qa_not_ready: automatic QA has not finished for this task yet"
+            )
+        if task["qa_state"] == QA_ERROR or task["qa"] is None:
+            raise ConflictError(
+                "no QA result exists for this task; re-run QA before reviewing"
+            )
+        new_state = REVIEW_APPROVED if approved else REVIEW_REJECTED
+        check_review_transition(task["review_state"], new_state)
+        now = utcnow()
+        conn = self.db.conn()
+        with transaction(conn):
+            conn.execute(
+                "INSERT INTO asset_reviews (task_id, qa_id, decision, note, reviewer,"
+                " created_at) VALUES (?,?,?,?,?,?)",
+                (task_id, task["qa"]["qa_id"], new_state, note[:2000], reviewer[:120], now),
+            )
+            # Keep needs_human_review in sync so the gate's two conditions agree.
+            conn.execute(
+                "UPDATE qa_results SET needs_human_review = ? WHERE qa_id = ?",
+                (0 if approved else 1, task["qa"]["qa_id"]),
+            )
+            cur = conn.execute(
+                "UPDATE tasks SET review_state = ?, reviewed_at = ?, reviewed_by = ?,"
+                " updated_at = ? WHERE task_id = ? AND review_state = ?",
+                (new_state, now, reviewer[:120], now, task_id, task["review_state"]),
+            )
+            if cur.rowcount != 1:  # concurrent review changed the state under us
+                raise ConflictError("review state changed concurrently; re-read the task")
+        return self.get_task(task_id)
+
+    def mark_review_state(self, task_id: str, new_state: str) -> None:
+        """System-driven review transition (publish_ready / published)."""
+        conn = self.db.conn()
+        with transaction(conn):
+            row = conn.execute(
+                "SELECT review_state FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"task {task_id} not found")
+            check_review_transition(row["review_state"], new_state)
+            conn.execute(
+                "UPDATE tasks SET review_state = ?, updated_at = ?"
+                " WHERE task_id = ? AND review_state = ?",
+                (new_state, utcnow(), task_id, row["review_state"]),
+            )
+
+    def mark_published(self, task_id: str) -> None:
+        """Record that an asset reached production.
+
+        `publish_ready` is a system-derived state, never settable by a human, so
+        it is passed through here on the way to `published` rather than being
+        exposed as something a reviewer can declare.
+        """
+        task = self.get_task(task_id, with_details=False)
+        if task["review_state"] == REVIEW_PUBLISHED:
+            return
+        if task["review_state"] == REVIEW_APPROVED:
+            self.mark_review_state(task_id, REVIEW_PUBLISH_READY)
+        self.mark_review_state(task_id, REVIEW_PUBLISHED)
 
     def complete_failure(
         self, task_id: str, *, error_code: str, error_message: str, retryable: bool

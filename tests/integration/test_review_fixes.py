@@ -20,7 +20,7 @@ from lunelle.providers.base import ProviderError
 from lunelle.providers.mock import MockImageProvider
 from lunelle.schemas import StyleSpec
 from lunelle.server import create_app
-from tests.conftest import make_config
+from tests.conftest import approve_all_via_api, make_config
 from tests.integration.test_worker_flows import make_style, run_worker_until_settled
 
 
@@ -127,22 +127,26 @@ class TestReviewEndpoint:
         client.post(f"/api/styles/{style_id}/generate",
                     json={"output_types": ["grid", "wearing"]})
         wait_success(client, 2)
-        tasks = client.get("/api/tasks").json()["tasks"]
 
-        # unreviewed assets are excluded from a reviewed-only export
-        response = client.post("/api/export", json={"include_unreviewed": False})
+        # Export is default-deny: nothing ships before a human verdict.
+        response = client.post("/api/export", json={})
         assert response.status_code == 422
 
-        for task in tasks:
-            out = client.post(f"/api/tasks/{task['task_id']}/review",
-                              json={"approved": True, "note": "looks good"})
-            assert out.status_code == 200, out.text
-            assert out.json()["needs_human_review"] is False
-            detail = client.get(f"/api/tasks/{task['task_id']}").json()
-            assert detail["qa"]["needs_human_review"] == 0
-            assert detail["metadata"]["reviews"][0]["approved"] is True
+        # `include_unreviewed` was removed; an old client sending it fails loudly
+        # instead of silently getting the opposite of what it asked for.
+        legacy = client.post("/api/export", json={"include_unreviewed": True})
+        assert legacy.status_code == 422
 
-        reviewed_export = client.post("/api/export", json={"include_unreviewed": False})
+        approved = approve_all_via_api(client, expect=2)
+        for out in approved:
+            assert out["needs_human_review"] is False
+            assert out["review_state"] == "approved"
+            detail = client.get(f"/api/tasks/{out['task_id']}").json()
+            assert detail["qa"]["needs_human_review"] == 0
+            assert detail["review_state"] == "approved"
+            assert detail["reviewed_at"] is not None
+
+        reviewed_export = client.post("/api/export", json={})
         assert reviewed_export.status_code == 200
         assert reviewed_export.json()["item_count"] == 1
 
@@ -184,6 +188,7 @@ class TestExportAtomicity:
                     json={"output_types": ["grid", "wearing"]})
         wait_success(client, 2)
 
+        approve_all_via_api(client, expect=2)
         first = client.post("/api/export", json={}).json()
         second = client.post("/api/export", json={}).json()
         assert first["export_dir"] != second["export_dir"]

@@ -18,7 +18,16 @@ from .config import Config, load_config
 from .db import Database, db_healthy, migrate
 from .export import ExportError, run_export
 from .logging_setup import setup_logging
-from .models import OUTPUT_GRID, OUTPUT_HERO, OUTPUT_TYPES, STATUSES, IllegalTransition
+from .models import (
+    OUTPUT_GRID,
+    OUTPUT_HERO,
+    OUTPUT_TYPES,
+    QA_STATES,
+    REVIEW_STATES,
+    STATUSES,
+    IllegalReviewTransition,
+    IllegalTransition,
+)
 from .profiles import ProfileService
 from .providers import build_chat_fn, build_provider
 from .qa import run_qa
@@ -95,9 +104,27 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         if not supplied or not _constant_time_eq(supplied, token):
             raise HTTPException(status_code=401, detail="missing or invalid X-Admin-Token")
 
+    def _reviewer_from(request: Request) -> str:
+        """Best-effort reviewer identity for the audit trail.
+
+        There is no user system yet, so record the admin-token fingerprint (never
+        the token) plus the client host. Enough to tell two operators apart in an
+        audit without storing a credential.
+        """
+        supplied = request.headers.get("x-admin-token", "")
+        if supplied:
+            digest = hashlib.sha256(supplied.encode()).hexdigest()[:8]
+            return f"token:{digest}"
+        client = request.client.host if request.client else "unknown"
+        return f"host:{client}"
+
     @app.exception_handler(NotFoundError)
     async def _not_found(_req, exc):
         return JSONResponse(status_code=404, content={"error": str(exc)})
+
+    @app.exception_handler(IllegalReviewTransition)
+    async def _illegal_review(_req, exc):
+        return JSONResponse(status_code=409, content={"error": str(exc)})
 
     @app.exception_handler(ConflictError)
     async def _conflict(_req, exc):
@@ -415,10 +442,13 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
                    status: str | None = Query(None, pattern="^(" + "|".join(STATUSES) + ")$"),
                    output_type: str | None = Query(None, pattern="^(" + "|".join(OUTPUT_TYPES) + ")$"),  # noqa: B008
                    batch_id: str | None = None,
+                   qa_state: str | None = Query(None, pattern="^(" + "|".join(QA_STATES) + ")$"),  # noqa: B008
+                   review_state: str | None = Query(None, pattern="^(" + "|".join(REVIEW_STATES) + ")$"),  # noqa: B008
                    limit: int = Query(100, ge=1, le=500),
                    offset: int = Query(0, ge=0)):
         tasks = request.app.state.service.list_tasks(
             sku=sku, status=status, output_type=output_type, batch_id=batch_id,
+            qa_state=qa_state, review_state=review_state,
             limit=limit, offset=offset,
         )
         return {"tasks": tasks}
@@ -496,39 +526,33 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         qa_doc = run_qa(output_type=task["output_type"], image_path=Path(task["output_path"]),
                         expected_size=size, min_side=min(config.qa_min_side, min(size)),
                         grid_image_path=grid_path)
-        from .qa import store_qa_result
-        store_qa_result(request.app.state.db, task_id, qa_doc)
-        return qa_doc
+        # Same path the worker uses: stores the verdict and reopens human review,
+        # so a re-run cannot leave a stale approval attached to a new verdict.
+        service.finish_qa(task_id, qa_doc)
+        refreshed = service.get_task(task_id)
+        return {**qa_doc, "qa_state": refreshed["qa_state"],
+                "review_state": refreshed["review_state"]}
 
     @app.post("/api/tasks/{task_id}/review", dependencies=[Depends(require_admin)])
     def review_task(task_id: str, body: ReviewRequest, request: Request):
-        """Record the human review verdict for a successful task's latest QA result."""
+        """Record the human verdict for a successful task's heuristic QA result.
+
+        Returns 409 `qa_not_ready` while automatic QA is still running: that
+        window is now an explicit state rather than a race the caller has to
+        guess at.
+        """
         service: TaskService = request.app.state.service
-        task = service.get_task(task_id)
-        if task["status"] != "success":
-            raise ConflictError("only successful tasks can be reviewed")
-        if task["qa"] is None:
-            raise ConflictError("task has no QA result to review; run QA first")
-        from .db import transaction, utcnow
-        db: Database = request.app.state.db
-        conn = db.conn()
-        with transaction(conn):
-            conn.execute(
-                "UPDATE qa_results SET needs_human_review = ? WHERE qa_id = ?",
-                (0 if body.approved else 1, task["qa"]["qa_id"]),
-            )
-        metadata = task["metadata"]
-        metadata.setdefault("reviews", []).append(
-            {"at": utcnow(), "approved": body.approved, "note": body.note}
+        task = service.record_review(
+            task_id, approved=body.approved, note=body.note,
+            reviewer=body.reviewer or _reviewer_from(request),
         )
-        with transaction(conn):
-            import json as _json
-            conn.execute(
-                "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE task_id = ?",
-                (_json.dumps(metadata, ensure_ascii=False), utcnow(), task_id),
-            )
-        return {"task_id": task_id, "approved": body.approved,
-                "needs_human_review": not body.approved}
+        return {
+            "task_id": task_id,
+            "approved": body.approved,
+            "qa_state": task["qa_state"],
+            "review_state": task["review_state"],
+            "needs_human_review": bool(task["qa"]["needs_human_review"]) if task["qa"] else True,
+        }
 
     # ---------------- API channel profiles ----------------
 
@@ -672,9 +696,7 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
     @app.post("/api/export", dependencies=[Depends(require_admin)])
     def export(body: ExportRequest, request: Request):
         try:
-            return run_export(request.app.state.db, config,
-                              skus=body.skus or None,
-                              include_unreviewed=body.include_unreviewed)
+            return run_export(request.app.state.db, config, skus=body.skus or None)
         except ExportError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

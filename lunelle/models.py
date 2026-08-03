@@ -57,6 +57,70 @@ def check_transition(current: str, new: str) -> None:
         raise IllegalTransition(current, new)
 
 
+# ---- QA pipeline state (orthogonal to task status) -------------------------
+#
+# A task reaching `success` only means the image exists. QA runs after, so
+# `qa_state` makes that window explicit and observable instead of leaving
+# callers to race it: complete_success writes status=success AND
+# qa_state=pending in one transaction, and the QA result lands with
+# qa_state=done in another.
+
+QA_PENDING = "pending"
+QA_RUNNING = "running"
+QA_DONE = "done"
+QA_ERROR = "error"
+QA_SKIPPED = "skipped"
+
+QA_STATES = (QA_PENDING, QA_RUNNING, QA_DONE, QA_ERROR, QA_SKIPPED)
+#: States in which no QA verdict exists yet, so review must not be accepted.
+QA_NOT_READY = (QA_PENDING, QA_RUNNING)
+
+# ---- Human review lifecycle ------------------------------------------------
+
+REVIEW_GENERATED = "generated"
+REVIEW_WAITING = "waiting_human_review"
+REVIEW_APPROVED = "approved"
+REVIEW_REJECTED = "rejected"
+REVIEW_PUBLISH_READY = "publish_ready"
+REVIEW_PUBLISHED = "published"
+
+REVIEW_STATES = (
+    REVIEW_GENERATED, REVIEW_WAITING, REVIEW_APPROVED,
+    REVIEW_REJECTED, REVIEW_PUBLISH_READY, REVIEW_PUBLISHED,
+)
+
+#: Review states the export/publish gate accepts. `publish_ready` is derived by
+#: the system (approved AND the machine gate agrees), never set by a human, so a
+#: human cannot bypass the gate by declaring something ready.
+PUBLISHABLE_REVIEW_STATES = frozenset(
+    {REVIEW_APPROVED, REVIEW_PUBLISH_READY, REVIEW_PUBLISHED}
+)
+
+#: Legal review transitions. Re-review of published/rejected assets is allowed
+#: (an asset can be pulled back), but nothing may jump straight to approved
+#: without QA having landed first (enforced in TaskService.record_review).
+ALLOWED_REVIEW_TRANSITIONS: dict[str, frozenset[str]] = {
+    REVIEW_GENERATED: frozenset({REVIEW_WAITING}),
+    REVIEW_WAITING: frozenset({REVIEW_APPROVED, REVIEW_REJECTED}),
+    REVIEW_APPROVED: frozenset({REVIEW_PUBLISH_READY, REVIEW_REJECTED, REVIEW_WAITING}),
+    REVIEW_REJECTED: frozenset({REVIEW_APPROVED, REVIEW_WAITING}),
+    REVIEW_PUBLISH_READY: frozenset({REVIEW_PUBLISHED, REVIEW_REJECTED, REVIEW_WAITING}),
+    REVIEW_PUBLISHED: frozenset({REVIEW_PUBLISH_READY, REVIEW_REJECTED, REVIEW_WAITING}),
+}
+
+
+class IllegalReviewTransition(Exception):
+    def __init__(self, current: str, new: str):
+        super().__init__(f"Illegal review transition {current!r} -> {new!r}")
+        self.current = current
+        self.new = new
+
+
+def check_review_transition(current: str, new: str) -> None:
+    if new not in ALLOWED_REVIEW_TRANSITIONS.get(current, frozenset()):
+        raise IllegalReviewTransition(current, new)
+
+
 # ---- Error codes -----------------------------------------------------------
 
 # Retryable: transient conditions where the same request may later succeed.
@@ -82,8 +146,15 @@ NON_RETRYABLE_ERROR_CODES = frozenset(
         "disk_full",
         "config_error",
         "unsupported",
+        # A required input asset is absent (e.g. no hand model for a matrix
+        # cell's tone+view). Retrying cannot help until an operator uploads it,
+        # so this fails fast BEFORE spending money on a degraded render.
+        "dependency_missing",
     }
 )
+
+#: Error code used when a task cannot run because a required input is missing.
+ERROR_DEPENDENCY_MISSING = "dependency_missing"
 
 
 def is_retryable(error_code: str | None) -> bool:

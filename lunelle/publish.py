@@ -21,6 +21,7 @@ becomes a problem.
 from __future__ import annotations
 
 import io
+import logging
 import re
 from pathlib import Path
 
@@ -28,7 +29,10 @@ from PIL import Image
 
 from .cloudflare import CloudflareClient
 from .db import Database
+from .gating import GATE_COLUMNS_SQL, LATEST_QA_JOIN, block_reason, row_is_publishable
 from .tasks import TaskService
+
+logger = logging.getLogger(__name__)
 
 VIEW_CODE = {
     "p2_open_hands": "01",
@@ -55,14 +59,19 @@ def _webp(path: Path, max_side: int | None = None, quality: int = 88) -> bytes:
 
 
 def collect_publishable_cells(db: Database, style_id: str) -> tuple[dict, list[dict]]:
-    """Latest successful matrix cell per (tone, view); a failing latest QA
-    excludes the cell, absent QA does not (heuristics may be offline)."""
+    """Latest matrix cell per (tone, view) that passes the shared publish gate.
+
+    Default-deny: a cell with no QA row, unfinished QA, a failing verdict, or no
+    human approval is excluded and reported. The newest cell per (tone, view)
+    decides — an older approved version never resurrects a rejected newer one,
+    because publishing the older image would contradict the latest verdict.
+    """
     conn = db.conn()
     rows = conn.execute(
-        "SELECT t.task_id, t.output_path, t.metadata_json,"
-        " (SELECT passed FROM qa_results q WHERE q.task_id = t.task_id"
-        "  ORDER BY q.qa_id DESC LIMIT 1) AS qa_passed"
-        " FROM tasks t WHERE t.style_id = ? AND t.output_type = 'matrix_cell'"
+        "SELECT t.task_id, t.output_path, t.metadata_json, t.status, t.qa_state,"  # noqa: S608
+        " t.review_state," + GATE_COLUMNS_SQL +   # module constants, not user input
+        " FROM tasks t" + LATEST_QA_JOIN +
+        " WHERE t.style_id = ? AND t.output_type = 'matrix_cell'"
         " AND t.status = 'success' ORDER BY t.completed_at DESC",
         (style_id,),
     ).fetchall()
@@ -71,20 +80,47 @@ def collect_publishable_cells(db: Database, style_id: str) -> tuple[dict, list[d
     cells: dict = {}
     excluded: list[dict] = []
     for row in rows:
-        metadata = _json.loads(row["metadata_json"] or "{}")
+        task = dict(row)
+        metadata = _json.loads(task["metadata_json"] or "{}")
         tone, view = metadata.get("tone"), metadata.get("view")
         if not tone or view not in VIEW_CODE or (tone, view) in cells:
             continue
-        if row["qa_passed"] == 0:
-            excluded.append({"tone": tone, "view": view, "reason": "qa_failed"})
+        if not row_is_publishable(task):
+            excluded.append({"tone": tone, "view": view,
+                             "reason": block_reason(task) or "blocked"})
             cells[(tone, view)] = None  # newest verdict wins; block older passes
             continue
-        path = Path(row["output_path"] or "")
-        if path.is_file():
-            cells[(tone, view)] = {"tone": tone, "view": view, "path": path,
-                                   "task_id": row["task_id"]}
+        path = Path(task["output_path"] or "")
+        if not path.is_file():
+            excluded.append({"tone": tone, "view": view,
+                             "reason": "output file missing on disk"})
+            cells[(tone, view)] = None
+            continue
+        cells[(tone, view)] = {"tone": tone, "view": view, "path": path,
+                               "task_id": task["task_id"]}
     ready = {k: v for k, v in cells.items() if v}
     return ready, excluded
+
+
+def _gated_latest_grid(db: Database, style_id: str) -> dict | None:
+    """Latest grid asset that passes the publish gate, or None."""
+    conn = db.conn()
+    row = conn.execute(
+        "SELECT t.task_id, t.output_path, t.status, t.qa_state, t.review_state,"  # noqa: S608
+        + GATE_COLUMNS_SQL +                      # module constants, not user input
+        " FROM tasks t" + LATEST_QA_JOIN +
+        " WHERE t.style_id = ? AND t.output_type = 'grid' AND t.status = 'success'"
+        " ORDER BY t.completed_at DESC LIMIT 1",
+        (style_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    task = dict(row)
+    if not row_is_publishable(task):
+        return None
+    if not task.get("output_path") or not Path(task["output_path"]).is_file():
+        return None
+    return task
 
 
 def publish_style(db: Database, service: TaskService, client: CloudflareClient,
@@ -106,9 +142,10 @@ def publish_style(db: Database, service: TaskService, client: CloudflareClient,
         uploaded.append({"tone": tone, "view": view, "code": code, "key": key,
                          "task_id": cell["task_id"]})
 
+    # The cover icon is customer-facing too, so it goes through the same gate.
     cover_key = None
-    thumb = service.latest_successful_grid(style_id)
-    if thumb and thumb.get("output_path") and Path(thumb["output_path"]).is_file():
+    thumb = _gated_latest_grid(db, style_id)
+    if thumb is not None:
         cover_key = f"tryon/icons/{tryon_id}-light-icon.webp"
         client.r2_put(cover_key, _webp(Path(thumb["output_path"]), max_side=ICON_MAX),
                       "image/webp")
@@ -132,6 +169,10 @@ def publish_style(db: Database, service: TaskService, client: CloudflareClient,
         [tryon_id, style["name"], cover_key, plan_key, int(tryon_id) * 10],
     )
     # --- D1: replace result asset rows so the manifest matches R2 exactly ---
+    # `qa_status='pass'` / `visual_status='approved'` are no longer asserted on
+    # this code's own authority: every cell in `uploaded` already cleared the
+    # gate (heuristic QA passed AND a human approved), so the values now report a
+    # verified fact rather than assuming one.
     client.d1_query(
         "DELETE FROM tryon_assets WHERE style_id = ? AND kind = 'result'", [tryon_id]
     )
@@ -143,6 +184,18 @@ def publish_style(db: Database, service: TaskService, client: CloudflareClient,
             [f"{tryon_id}-{item['tone']}-{item['code']}-result", tryon_id,
              item["tone"], item["code"], item["key"]],
         )
+
+    # Stamp what actually reached production. Best-effort: the assets are already
+    # live, so a bookkeeping failure must not turn a successful publish into an
+    # error the operator would retry.
+    published_task_ids = [item["task_id"] for item in uploaded]
+    if thumb is not None:
+        published_task_ids.append(thumb["task_id"])
+    for task_id in published_task_ids:
+        try:
+            service.mark_published(task_id)
+        except Exception:  # noqa: BLE001 - never fail an already-live publish
+            logger.exception("could not stamp published state for %s", task_id)
 
     return {
         "tryon_style_id": tryon_id,

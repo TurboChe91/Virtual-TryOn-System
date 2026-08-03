@@ -7,8 +7,10 @@ Produces, under LUNELLE_EXPORT_DIR/export-<UTC timestamp>/:
   products.csv            Shopify product import skeleton
   generation-report.csv   per-asset generation/QA report
 
-Only styles whose grid AND wearing tasks succeeded are exported. Files are
-copies — task outputs are never moved or modified.
+Only styles whose grid AND wearing assets pass the shared publish gate are
+exported (see lunelle/gating.py): the task succeeded, heuristic QA finished and
+passed, and a human approved it. Files are copies — task outputs are never moved
+or modified.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from PIL import Image
 
 from .config import Config
 from .db import Database, utcnow
+from .gating import LATEST_QA_JOIN, block_reason, row_is_publishable
 from .models import OUTPUT_GRID, OUTPUT_WEARING, SUCCESS
 
 logger = logging.getLogger(__name__)
@@ -63,11 +66,15 @@ def _claim_export_dir(base: Path, stamp: str) -> Path:
 
 
 def _latest_success(conn, style_id: str, output_type: str) -> dict | None:
+    """Latest successful task of this type, joined to its latest HEURISTIC QA row.
+
+    LLM verdicts are excluded from the join (see gating.LATEST_QA_JOIN): they are
+    advisory and must never make an asset look gate-eligible.
+    """
     row = conn.execute(
-        "SELECT t.*, q.passed AS qa_passed, q.score AS qa_score,"
+        "SELECT t.*, q.qa_id AS qa_id, q.passed AS qa_passed, q.score AS qa_score,"  # noqa: S608
         " q.needs_human_review AS qa_needs_review"
-        " FROM tasks t LEFT JOIN qa_results q ON q.qa_id ="
-        "   (SELECT qa_id FROM qa_results WHERE task_id = t.task_id ORDER BY qa_id DESC LIMIT 1)"
+        " FROM tasks t" + LATEST_QA_JOIN +   # module constant, not user input
         " WHERE t.style_id = ? AND t.output_type = ? AND t.status = ?"
         " ORDER BY t.completed_at DESC LIMIT 1",
         (style_id, output_type, SUCCESS),
@@ -88,7 +95,6 @@ def run_export(
     config: Config,
     *,
     skus: list[str] | None = None,
-    include_unreviewed: bool = True,
 ) -> dict:
     conn = db.conn()
     if skus:
@@ -122,19 +128,20 @@ def run_export(
         style_doc = dict(style)
         spec = json.loads(style_doc["spec_json"])
         pair = {}
-        complete = True
+        blocked_reason: str | None = None
         for output_type in (OUTPUT_GRID, OUTPUT_WEARING):
             task = _latest_success(conn, style_doc["style_id"], output_type)
             if task is None or not task.get("output_path") or not Path(task["output_path"]).is_file():
-                complete = False
+                blocked_reason = f"missing a successful {output_type} asset"
                 break
-            if not include_unreviewed and task.get("qa_needs_review"):
-                complete = False
+            # Default-deny: the single shared gate decides, and it treats an
+            # absent QA row as "not allowed" rather than as "nothing to review".
+            if not row_is_publishable(task):
+                blocked_reason = f"{output_type}: {block_reason(task)}"
                 break
             pair[output_type] = task
-        if not complete:
-            skipped.append({"sku": style_doc["sku"],
-                            "reason": "missing a successful grid or wearing asset"})
+        if blocked_reason is not None:
+            skipped.append({"sku": style_doc["sku"], "reason": blocked_reason})
             continue
 
         entry = {"sku": style_doc["sku"], "style_id": style_doc["style_id"],
@@ -183,8 +190,14 @@ def run_export(
     if not items:
         shutil.rmtree(staging_dir, ignore_errors=True)
         export_dir.rmdir()
+        # Name the actual blockers: "missing" and "withheld pending review" are
+        # very different problems, and the operator needs to know which it is.
+        detail = "; ".join(f"{s['sku']}: {s['reason']}" for s in skipped[:5])
+        suffix = f" ({detail})" if detail else ""
+        more = f" and {len(skipped) - 5} more" if len(skipped) > 5 else ""
         raise ExportError(
-            "no styles have both a successful grid and wearing image to export"
+            "no styles are exportable: every style is missing a grid/wearing asset "
+            "or is withheld by the review gate" + suffix + more
         )
 
     manifest = {

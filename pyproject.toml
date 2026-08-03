@@ -16,7 +16,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S105", "S106", "S108", "S311", "E501"]
+# S608: gate tests build SQL from module constants on purpose, to prove the SQL
+# and Python forms of the gate agree.
+"tests/*" = ["S105", "S106", "S108", "S311", "S608", "E501"]
 # prompt templates are long natural-language lines by design
 "lunelle/prompts.py" = ["E501"]
 
