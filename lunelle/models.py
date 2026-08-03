@@ -36,8 +36,12 @@ MANUAL_RETRY_STATUSES = (FAILED, CANCELLED)
 
 # Explicit transition table — the only legal state changes.
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
-    PENDING: frozenset({RUNNING, CANCELLED}),
-    RETRYING: frozenset({RUNNING, CANCELLED}),
+    # PENDING/RETRYING -> FAILED is reachable without ever running: a task whose
+    # dependency failed terminally can never proceed, and failing it as
+    # dependency_failed is better than leaving it queued forever or letting it run
+    # and produce a silently degraded asset (see TaskService.propagate_dependency_failure).
+    PENDING: frozenset({RUNNING, CANCELLED, FAILED}),
+    RETRYING: frozenset({RUNNING, CANCELLED, FAILED}),
     RUNNING: frozenset({SUCCESS, FAILED, RETRYING}),
     FAILED: frozenset({PENDING}),      # manual re-queue
     CANCELLED: frozenset({PENDING}),   # manual re-queue
@@ -158,6 +162,10 @@ NON_RETRYABLE_ERROR_CODES = frozenset(
         # would just trip the breaker again. Recovers via manual retry once the
         # window rolls or the cap is raised.
         "budget_exceeded",
+        # A task this one waited on failed terminally. Retrying is pointless
+        # until the dependency itself succeeds, and running anyway would produce a
+        # silently degraded asset (see migration 0008).
+        "dependency_failed",
     }
 )
 
@@ -165,6 +173,11 @@ NON_RETRYABLE_ERROR_CODES = frozenset(
 ERROR_DEPENDENCY_MISSING = "dependency_missing"
 #: Error code used when the budget circuit breaker refuses a provider call.
 ERROR_BUDGET_EXCEEDED = "budget_exceeded"
+#: Error code used when a task's dependency failed terminally.
+ERROR_DEPENDENCY_FAILED = "dependency_failed"
+
+#: Statuses from which a dependency can never become satisfiable.
+TERMINAL_FAILURE_STATUSES = (FAILED, CANCELLED)
 
 
 def is_retryable(error_code: str | None) -> bool:

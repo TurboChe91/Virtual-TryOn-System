@@ -62,21 +62,26 @@ class TestPromptReferenceBlocks:
         assert strip_reference_block(with_ref) == without
 
     def test_stored_wearing_prompt_stripped_when_no_grid(self, config, db, service):
-        """Wearing runs text-only when grid failed; sent prompt must not claim Image 1."""
+        """A wearing shot queued on its own, with no grid anywhere, still runs —
+        and its sent prompt must not claim an Image 1 that was never attached.
+
+        (A wearing shot queued ALONGSIDE its grid now fails as dependency_failed
+        when that grid fails, rather than rendering text-only; see
+        test_grid_failure_fails_the_wearing_shot_that_waited_on_it.)
+        """
         style = make_style(service)
-        service.create_generation(style["style_id"], ["grid", "wearing"])
+        service.create_generation(style["style_id"], ["wearing"])
 
         sent_prompts = {}
         good = MockImageProvider(allowed=True)
 
         class Capture(MockImageProvider):
             def generate(self, request):
-                if "2 rows and 5 columns" in request.prompt:
-                    raise ProviderError("content_policy", "no grid", retryable=False)
                 sent_prompts["wearing"] = request.prompt
                 return good.generate(request)
 
         run_worker_until_settled(config, db, service, Capture(allowed=True))
+        assert sent_prompts, "the wearing task never reached the provider"
         assert "Image 1" not in sent_prompts["wearing"]
 
 

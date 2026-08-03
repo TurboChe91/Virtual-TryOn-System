@@ -147,8 +147,14 @@ class TestRetries:
         with pytest.raises(ConflictError, match="only failed or cancelled"):
             service.manual_retry(task_id)
 
-    def test_grid_failure_does_not_break_wearing(self, config, db, service):
-        """Wearing proceeds text-only when grid failed (independence rule)."""
+    def test_grid_failure_fails_the_wearing_shot_that_waited_on_it(
+        self, config, db, service
+    ):
+        """BEHAVIOUR CHANGE (was "independence rule"): a wearing shot queued
+        alongside its grid used to proceed text-only when the grid failed, and
+        succeed. That is a paid, silently degraded asset — the pair must match in
+        colour, shape and decoration, which a text-only render cannot guarantee.
+        It now fails as dependency_failed and costs nothing."""
         style = make_style(service)
         service.create_generation(style["style_id"], ["grid", "wearing"])
 
@@ -165,8 +171,41 @@ class TestRetries:
         run_worker_until_settled(config, db, service, GridFailsProvider(allowed=True))
         tasks = {t["output_type"]: service.get_task(t["task_id"]) for t in service.list_tasks()}
         assert tasks["grid"]["status"] == "failed"
-        assert tasks["wearing"]["status"] == "success"
-        assert tasks["wearing"]["metadata"]["reference_used"] is False
+        assert tasks["wearing"]["status"] == "failed"
+        assert tasks["wearing"]["error_code"] == "dependency_failed"
+        # Only the grid was ever sent to the provider.
+        assert calls["n"] == 1
+
+    def test_retrying_the_grid_revives_the_wearing_shot(self, config, db, service):
+        """Otherwise an operator fixes the grid, watches it succeed, and is left
+        with a dead wearing task and no signal that the pair is incomplete."""
+        style = make_style(service)
+        service.create_generation(style["style_id"], ["grid", "wearing"])
+        good = MockImageProvider(allowed=True)
+
+        class GridFailsOnce(MockImageProvider):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.grid_calls = 0
+
+            def generate(self, request):
+                if "2 rows and 5 columns" in request.prompt:
+                    self.grid_calls += 1
+                    if self.grid_calls == 1:
+                        raise ProviderError("content_policy", "rejected", retryable=False)
+                return good.generate(request)
+
+        provider = GridFailsOnce(allowed=True)
+        run_worker_until_settled(config, db, service, provider)
+        by_type = {t["output_type"]: t for t in service.list_tasks()}
+        assert by_type["wearing"]["status"] == "failed"
+
+        service.manual_retry(by_type["grid"]["task_id"], note="retry after fix")
+        run_worker_until_settled(config, db, service, provider, timeout=60)
+        after = {t["output_type"]: service.get_task(t["task_id"])
+                 for t in service.list_tasks()}
+        assert after["grid"]["status"] == "success"
+        assert after["wearing"]["status"] == "success"
 
 
 class TestIdempotency:

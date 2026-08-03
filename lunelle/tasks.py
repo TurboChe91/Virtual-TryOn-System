@@ -18,6 +18,7 @@ from .db import Database, transaction, utcnow
 from .models import (
     CANCELLED,
     CLAIMABLE_STATUSES,
+    ERROR_DEPENDENCY_FAILED,
     FAILED,
     GENERATABLE_OUTPUT_TYPES,
     MANUAL_RETRY_STATUSES,
@@ -289,6 +290,7 @@ class TaskService:
     def create_generation(
         self, style_id: str, output_types: list[str], *, force: bool = False,
         note: str = "", root_override: str | None = None,
+        parent_task_id: str | None = None, lineage_reason: str | None = None,
     ) -> GenerationPlan:
         """Queue operator-requested generations.
 
@@ -296,6 +298,9 @@ class TaskService:
         opening a new one — used by automatic re-generation, so a re-roll spends
         the original root's shared allowance rather than granting itself a fresh
         one (which is how the old per-path counters could alternate forever).
+        `parent_task_id` records the direct ancestor: the root gives the budget
+        scope, the parent gives the step, and reconstructing a repair chain needs
+        both.
         """
         style = self.get_style(style_id)
         bundle = self.prompt_bundle_for(style)
@@ -406,12 +411,14 @@ class TaskService:
                         "waits_for_grid": bool(wait_for),
                     },
                 )
+                depth = self._depth_after(conn, parent_task_id)
                 conn.execute(
                     "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
                     " negative_prompt, prompt_version, provider, model, status, retry_count,"
                     " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
-                    " created_at, updated_at, root_task_id, input_fingerprint, metadata_json)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " created_at, updated_at, root_task_id, parent_task_id, lineage_depth,"
+                    " lineage_reason, input_fingerprint, metadata_json)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         task_id,
                         batch_id,
@@ -432,6 +439,10 @@ class TaskService:
                         now,
                         now,
                         root_task_id,
+                        parent_task_id,
+                        depth,
+                        lineage_reason or ("operator_request" if parent_task_id is None
+                                           else "regeneration"),
                         fingerprint,
                         json.dumps(metadata, ensure_ascii=False),
                     ),
@@ -509,6 +520,16 @@ class TaskService:
         })
         estimate["budget"] = spend_snapshot(self.db, self.config).as_dict()
         return estimate
+
+    @staticmethod
+    def _depth_after(conn, parent_task_id: str | None) -> int:
+        """Depth of a child of `parent_task_id`. Roots are 0."""
+        if parent_task_id is None:
+            return 0
+        row = conn.execute(
+            "SELECT lineage_depth FROM tasks WHERE task_id = ?", (parent_task_id,)
+        ).fetchone()
+        return (int(row["lineage_depth"]) + 1) if row is not None else 1
 
     def _matrix_input_paths(self, conn, style: dict, tone: str, view: str) -> list[Path]:
         """Design authority then hand model, in the order the provider receives
@@ -639,14 +660,15 @@ class TaskService:
                         "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
                         " negative_prompt, prompt_version, provider, model, status, retry_count,"
                         " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
-                        " created_at, updated_at, root_task_id, input_fingerprint, metadata_json)"
-                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        " created_at, updated_at, root_task_id, parent_task_id, lineage_depth,"
+                        " lineage_reason, input_fingerprint, metadata_json)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             task_id, batch_id, style_id, style["sku"], OUTPUT_MATRIX_CELL,
                             prompt, "", MATRIX_PROMPT_VERSION, provider_name, model,
                             PENDING, 0, self.config.max_retries, price, key, None,
-                            now, now, task_id, fingerprint,
-                            json.dumps(metadata, ensure_ascii=False),
+                            now, now, task_id, None, 0, "operator_request",
+                            fingerprint, json.dumps(metadata, ensure_ascii=False),
                         ),
                     )
                     store_snapshot_locked(conn, task_id, snapshot, fingerprint)
@@ -775,8 +797,9 @@ class TaskService:
                 "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
                 " negative_prompt, prompt_version, provider, model, status, retry_count,"
                 " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
-                " created_at, updated_at, root_task_id, input_fingerprint, metadata_json)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " created_at, updated_at, root_task_id, parent_task_id, lineage_depth,"
+                " lineage_reason, input_fingerprint, metadata_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     new_id_, batch_id, source["style_id"], source["sku"],
                     source["output_type"], prompt, source["negative_prompt"],
@@ -784,8 +807,12 @@ class TaskService:
                     self.config.max_retries, price,
                     self.idempotency_key(source["style_id"], source["output_type"],
                                          source["prompt_version"], prompt, batch_id),
-                    None, now, now, root_task_id, fingerprint,
-                    json.dumps(metadata, ensure_ascii=False),
+                    None, now, now, root_task_id,
+                    # The corrected task IS the parent — a correction chain is the
+                    # deepest lineage this system produces, so its ancestry has to
+                    # be a column rather than a metadata key.
+                    task_id, self._depth_after(conn, task_id), "correction",
+                    fingerprint, json.dumps(metadata, ensure_ascii=False),
                 ),
             )
             store_snapshot_locked(conn, new_id_, snapshot, fingerprint)
@@ -806,14 +833,73 @@ class TaskService:
     # ---------------- task queries ----------------
 
     def lineage_for(self, task_id: str) -> dict:
-        """Shared automatic-work budget for this task's lineage.
+        """Shared automatic-work budget for this task's lineage, plus the chain.
 
         Exposed so an operator can see why automatic correction stopped: without
         it, "the system stopped trying" looks identical to "the system is broken".
+        The chain answers the other half — what this asset is a repair OF.
         """
         task = self.get_task(task_id, with_details=False)
         root = task.get("root_task_id") or task_id
-        return lineage_status(self.db, root)
+        status = lineage_status(self.db, root)
+        status["ancestors"] = self.ancestors_of(task_id)
+        status["descendants"] = self.descendants_of(task_id)
+        status["this_task"] = {
+            "task_id": task_id,
+            "parent_task_id": task.get("parent_task_id"),
+            "lineage_depth": task.get("lineage_depth", 0),
+            "lineage_reason": task.get("lineage_reason"),
+        }
+        return status
+
+    def ancestors_of(self, task_id: str, limit: int = 50) -> list[dict]:
+        """Walk parent links from this task back to the root, nearest first."""
+        conn = self.db.conn()
+        chain: list[dict] = []
+        seen = {task_id}
+        current = task_id
+        while len(chain) < limit:
+            row = conn.execute(
+                "SELECT parent_task_id FROM tasks WHERE task_id = ?", (current,)
+            ).fetchone()
+            if row is None or not row["parent_task_id"]:
+                break
+            parent_id = row["parent_task_id"]
+            if parent_id in seen:  # pragma: no cover - malformed cycle guard
+                break
+            seen.add(parent_id)
+            parent = conn.execute(
+                "SELECT task_id, output_type, status, review_state, lineage_depth,"
+                " lineage_reason, output_path, created_at, input_fingerprint"
+                " FROM tasks WHERE task_id = ?", (parent_id,)
+            ).fetchone()
+            if parent is None:
+                break
+            chain.append(dict(parent))
+            current = parent_id
+        return chain
+
+    def descendants_of(self, task_id: str, limit: int = 100) -> list[dict]:
+        """Everything derived from this task, breadth-first."""
+        conn = self.db.conn()
+        out: list[dict] = []
+        queue = [task_id]
+        seen = {task_id}
+        while queue and len(out) < limit:
+            current = queue.pop(0)
+            rows = conn.execute(
+                "SELECT task_id, output_type, status, review_state, lineage_depth,"
+                " lineage_reason, output_path, created_at, input_fingerprint"
+                " FROM tasks WHERE parent_task_id = ? ORDER BY created_at",
+                (current,),
+            ).fetchall()
+            for row in rows:
+                if row["task_id"] in seen:  # pragma: no cover - cycle guard
+                    continue
+                seen.add(row["task_id"])
+                out.append(dict(row))
+                queue.append(row["task_id"])
+        return out
 
     def get_task(self, task_id: str, *, with_details: bool = True) -> dict:
         conn = self.db.conn()
@@ -883,7 +969,9 @@ class TaskService:
             f"SELECT task_id, batch_id, style_id, sku, output_type, prompt_version, provider,"  # noqa: S608
             f" model, status, retry_count, max_retries, estimated_cost_usd, actual_cost_usd,"
             f" created_at, started_at, completed_at, updated_at, output_path, error_code,"
-            f" qa_state, review_state, reviewed_at, root_task_id, metadata_json"
+            f" qa_state, review_state, reviewed_at, root_task_id,"
+            f" parent_task_id, lineage_depth, lineage_reason, input_fingerprint,"
+            f" metadata_json"
             f" FROM tasks {where} ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",  # noqa: S608
             (*params, limit, offset),
         ).fetchall()
@@ -944,12 +1032,18 @@ class TaskService:
         conn = self.db.conn()
         now = utcnow()
         with transaction(conn):
+            # A dependency must have SUCCEEDED, not merely stopped being active.
+            # The previous condition (`NOT IN (pending, running, retrying)`) let a
+            # failed or cancelled dependency release its dependent, which then ran
+            # and silently produced a degraded asset at full price. Propagation
+            # normally fails such dependents first; this is the backstop for the
+            # window where it has not run yet.
             row = conn.execute(
                 "SELECT * FROM tasks"
                 " WHERE status IN (?, ?)"
                 " AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
-                " AND (wait_for_task_id IS NULL OR wait_for_task_id NOT IN"
-                "      (SELECT task_id FROM tasks WHERE status IN ('pending','running','retrying')))"
+                " AND (wait_for_task_id IS NULL OR wait_for_task_id IN"
+                "      (SELECT task_id FROM tasks WHERE status = 'success'))"
                 " ORDER BY created_at LIMIT 1",
                 (*CLAIMABLE_STATUSES, now),
             ).fetchone()
@@ -1022,7 +1116,7 @@ class TaskService:
         # no way to tell "QA not run yet" from "QA found nothing" — that was the
         # race behind the flaky /review 409. Reordering the QA call alone would
         # only shrink the window; the explicit state removes it.
-        return self.transition(
+        doc = self.transition(
             task_id,
             SUCCESS,
             output_path=str(output_path),
@@ -1035,6 +1129,42 @@ class TaskService:
             review_state=REVIEW_GENERATED,
             metadata_json=json.dumps(metadata, ensure_ascii=False),
         )
+        self.revive_dependents(task_id)
+        return doc
+
+    def revive_dependents(self, task_id: str) -> list[str]:
+        """Re-queue tasks that were failed ONLY because this one had failed.
+
+        Without this, an operator who retries a failed grid watches it succeed
+        while the wearing shot stays dead — and would reasonably assume the pair is
+        complete. Deliberately narrow: only `failed` dependents whose error_code is
+        exactly dependency_failed. A dependent that failed for its own reason keeps
+        that failure, because this task succeeding says nothing about it.
+        """
+        conn = self.db.conn()
+        rows = conn.execute(
+            "SELECT task_id FROM tasks WHERE wait_for_task_id = ? AND status = ?"
+            " AND error_code = ?",
+            (task_id, FAILED, ERROR_DEPENDENCY_FAILED),
+        ).fetchall()
+        revived: list[str] = []
+        for row in rows:
+            try:
+                self.transition(
+                    row["task_id"], PENDING,
+                    error_code=None, error_message=None, next_attempt_at=None,
+                    retry_count=0,  # its dependency is fixed; grant a fresh budget
+                )
+            except IllegalTransition:  # pragma: no cover - raced by a worker
+                continue
+            revived.append(row["task_id"])
+        if revived:
+            logger.info(
+                "dependents re-queued after their dependency succeeded",
+                extra={"ctx": {"task_id": task_id, "stage": "dependency",
+                                "status": f"revived={len(revived)}"}},
+            )
+        return revived
 
     # ---------------- QA / review state ----------------
 
@@ -1167,13 +1297,75 @@ class TaskService:
                                 "attempt": retry_count + 1, "stage": "retry_scheduled"}},
             )
             return doc
-        return self.transition(
+        doc = self.transition(
             task_id,
             FAILED,
             completed_at=utcnow(),
             error_code=error_code,
             error_message=safe_message,
         )
+        # Terminal failure: anything waiting on this task can never proceed, so
+        # fail it now rather than letting it run degraded or wait forever.
+        self.propagate_dependency_failure(task_id)
+        return doc
+
+    def propagate_dependency_failure(self, task_id: str) -> list[str]:
+        """Fail everything waiting on a terminally-failed task, transitively.
+
+        Called when a task reaches `failed` or `cancelled`. Without this, a
+        dependent either waits forever or — before the claim_next fix — ran anyway
+        and produced a silently degraded asset.
+
+        Transitive because a chain is possible: grid -> wearing -> correction. The
+        walk is breadth-first over wait_for_task_id with a visited set, so a
+        malformed cycle cannot spin.
+        """
+        conn = self.db.conn()
+        failed: list[str] = []
+        queue = [task_id]
+        seen = {task_id}
+        while queue:
+            current = queue.pop(0)
+            dependents = conn.execute(
+                "SELECT task_id, status FROM tasks WHERE wait_for_task_id = ?"
+                " AND status IN (?, ?)",
+                (current, PENDING, RETRYING),
+            ).fetchall()
+            for row in dependents:
+                dependent_id = row["task_id"]
+                if dependent_id in seen:  # pragma: no cover - cycle guard
+                    continue
+                seen.add(dependent_id)
+                try:
+                    self.transition(
+                        dependent_id,
+                        FAILED,
+                        completed_at=utcnow(),
+                        error_code=ERROR_DEPENDENCY_FAILED,
+                        error_message=(
+                            f"dependency {current} failed terminally; refusing to "
+                            f"generate a degraded asset without it"
+                        ),
+                    )
+                except IllegalTransition:
+                    # Expected only when a worker claimed the dependent between
+                    # the SELECT and here. Logged rather than swallowed: silently
+                    # skipping is how a genuinely unreachable transition hid as
+                    # "task stuck in pending".
+                    logger.warning(
+                        "could not propagate dependency failure to %s (raced)",
+                        dependent_id,
+                    )
+                    continue
+                failed.append(dependent_id)
+                queue.append(dependent_id)
+        if failed:
+            logger.warning(
+                "dependency failure propagated",
+                extra={"ctx": {"task_id": task_id, "stage": "dependency",
+                                "status": f"failed={len(failed)}"}},
+            )
+        return failed
 
     def stamp_metadata(self, task_id: str, extra: dict) -> None:
         """Merge keys into a task's metadata_json (no status transition)."""
@@ -1212,7 +1404,11 @@ class TaskService:
         task = self.get_task(task_id, with_details=False)
         if task["status"] not in (PENDING, RETRYING):
             raise ConflictError(f"cannot cancel a task in status {task['status']}")
-        return self.transition(task_id, CANCELLED, completed_at=utcnow())
+        doc = self.transition(task_id, CANCELLED, completed_at=utcnow())
+        # Cancellation is terminal too: a dependent would otherwise wait for a
+        # task that is never going to run.
+        self.propagate_dependency_failure(task_id)
+        return doc
 
     # ---------------- recovery ----------------
 

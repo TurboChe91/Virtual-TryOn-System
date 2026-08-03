@@ -519,6 +519,10 @@ class Worker:
                     task["style_id"], [task["output_type"]], force=True,
                     note=f"auto-regen after QA fail of {task['task_id']}",
                     root_override=root_task_id,
+                    # The task whose QA failed is the direct ancestor, which is
+                    # what makes a re-roll chain reconstructible.
+                    parent_task_id=task["task_id"],
+                    lineage_reason="auto_regeneration",
                 )
                 queued = [created["task_id"] for created in plan.created]
             for task_id in queued:

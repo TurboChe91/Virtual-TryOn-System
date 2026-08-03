@@ -72,13 +72,17 @@ class TestStateMachine:
         ("running", "success"), ("running", "failed"), ("running", "retrying"),
         ("retrying", "running"), ("retrying", "cancelled"),
         ("failed", "pending"), ("cancelled", "pending"),
+        # A queued task whose dependency failed terminally can never proceed, so
+        # it fails without ever running (dependency_failed). Previously illegal,
+        # which left such tasks queued forever.
+        ("pending", "failed"), ("retrying", "failed"),
     ])
     def test_legal(self, current, new):
         models.check_transition(current, new)
 
     @pytest.mark.parametrize("current,new", [
         ("success", "running"), ("success", "pending"), ("pending", "success"),
-        ("failed", "running"), ("pending", "failed"), ("cancelled", "running"),
+        ("failed", "running"), ("cancelled", "running"),
         ("running", "pending"),
     ])
     def test_illegal(self, current, new):
