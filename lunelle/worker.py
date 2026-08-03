@@ -17,6 +17,7 @@ import threading
 import time
 from pathlib import Path
 
+from .assets import describe_inputs
 from .budget import (
     BudgetExceeded,
     LineageBudgetExceeded,
@@ -44,6 +45,7 @@ from .profiles import ProviderResolver
 from .prompts import strip_reference_block
 from .providers import GenerationRequest, ImageProvider, ProviderError
 from .qa import run_qa, store_qa_result
+from .snapshots import record_execution
 from .tasks import TaskService
 
 logger = logging.getLogger(__name__)
@@ -234,6 +236,20 @@ class Worker:
                 error_message=str(exc), retryable=False,
             )
             return
+
+        # Record what is actually going out, before it goes. The plan lives in the
+        # snapshot; this is the observation, and the two legitimately differ (a
+        # missing reference strips the prompt's reference block).
+        try:
+            record_execution(
+                self.db, task["task_id"], attempt_no,
+                resolved_assets=describe_inputs(self.db, self.config, references,
+                                                kind="reference"),
+                prompt_sent=prompt, model=task["model"], provider=provider.name,
+            )
+        except Exception:  # noqa: BLE001 - provenance must not block generation
+            logger.exception("could not record execution provenance for %s",
+                             task["task_id"])
 
         started = time.monotonic()
         try:

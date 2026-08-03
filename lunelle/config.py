@@ -154,8 +154,14 @@ class Config:
     def price_for(self, model: str) -> float:
         return self.pricing_usd.get(model, FALLBACK_PRICE_USD)
 
+    @property
+    def asset_dir(self) -> Path:
+        """Content-addressed input store (see lunelle/assets.py)."""
+        return self.data_dir / "assets"
+
     def runtime_dirs(self) -> list[Path]:
-        return [self.data_dir, self.output_dir, self.upload_dir, self.export_dir, self.log_dir]
+        return [self.data_dir, self.output_dir, self.upload_dir, self.export_dir,
+                self.log_dir, self.asset_dir]
 
     def ensure_dirs(self) -> None:
         for d in self.runtime_dirs():

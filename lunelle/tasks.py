@@ -58,10 +58,19 @@ from .prompts import (
     prompt_version_for,
 )
 from .schemas import StyleSpec
+from .snapshots import (
+    build_snapshot,
+    compute_fingerprint,
+    config_fingerprint_fields,
+    contract_hashes_for,
+    profile_snapshot,
+    store_snapshot_locked,
+)
 
 logger = logging.getLogger(__name__)
 
 
+from .assets import describe_inputs_locked  # noqa: E402
 from .budget import (  # noqa: E402
     check_can_queue_locked,
     estimate_plan,
@@ -210,6 +219,12 @@ class TaskService:
 
     def _generation_channel(self) -> tuple[str, str, float, str | None]:
         """(provider, model, price, profile_name) — active DB profile wins over env."""
+        provider, model, price, profile_row = self._generation_channel_row()
+        return provider, model, price, (profile_row["name"] if profile_row else None)
+
+    def _generation_channel_row(self):
+        """As above, but returns the profile ROW so a snapshot can freeze the
+        channel's identity (never its key — see snapshots.profile_snapshot)."""
         from .profiles import ProfileService
 
         row = ProfileService(self.db).active_row()
@@ -219,7 +234,51 @@ class TaskService:
         price = row["price_per_image_usd"]
         if price is None:
             price = self.config.price_for(row["model"])
-        return "openai-compat", row["model"], float(price), row["name"]
+        return "openai-compat", row["model"], float(price), row
+
+    def _snapshot_for(
+        self, conn, *, style: dict, output_type: str, prompt: str,
+        negative_prompt: str, prompt_version: str, provider: str, model: str,
+        size: tuple[int, int], profile_row, input_paths: list[Path],
+        asset_kind: str, extra: dict | None = None,
+    ) -> tuple[dict, str]:
+        """Build (snapshot, input_fingerprint) for one task.
+
+        What can be frozen at creation time is frozen here. Inputs that only exist
+        at execution time — the grid a wearing shot will use is generated later in
+        the same batch — are recorded as intent flags in `extra`, and the actual
+        digests land in task_executions. Claiming a digest for a file that does not
+        exist yet would make the snapshot a guess.
+        """
+        assets_described = describe_inputs_locked(conn, input_paths, kind=asset_kind)
+        merged_extra = dict(config_fingerprint_fields(self.config))
+        if extra:
+            merged_extra.update(extra)
+        snapshot = build_snapshot(
+            style=style,
+            spec={k: v for k, v in style["spec"].items() if not k.startswith("_")},
+            output_type=output_type,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            prompt_version=prompt_version,
+            contract_hashes=contract_hashes_for(output_type),
+            provider=provider,
+            model=model,
+            size=size,
+            reference_mode=self.config.reference_mode,
+            disable_watermark=self.config.disable_provider_watermark,
+            api_profile=profile_snapshot(profile_row),
+            input_assets=assets_described,
+            extra=merged_extra,
+        )
+        return snapshot, compute_fingerprint(snapshot)
+
+    def _size_for_output(self, output_type: str) -> tuple[int, int]:
+        if output_type == OUTPUT_GRID:
+            return self.config.grid_size
+        if output_type == OUTPUT_HERO:
+            return self.config.hero_size
+        return self.config.wearing_size
 
     @staticmethod
     def idempotency_key(style_id: str, output_type: str, prompt_version: str, prompt: str, nonce: str) -> str:
@@ -243,7 +302,8 @@ class TaskService:
         for output_type in output_types:
             if output_type not in GENERATABLE_OUTPUT_TYPES:
                 raise ValueError(f"invalid output type {output_type!r}")
-        provider_name, model, price, profile_name = self._generation_channel()
+        provider_name, model, price, profile_row = self._generation_channel_row()
+        profile_name = profile_row["name"] if profile_row else None
 
         conn = self.db.conn()
         batch_id = new_batch_id()
@@ -318,12 +378,40 @@ class TaskService:
                 # An operator-requested task is its own lineage root, and gets a
                 # fresh shared allowance for whatever automatic work follows.
                 root_task_id = root_override or task_id
+                # Freeze the inputs. Only assets that exist NOW get a digest; the
+                # grid a wearing shot will use does not exist yet, so its intent is
+                # recorded and the actual digest lands in task_executions.
+                input_paths: list[Path] = []
+                if metadata.get("use_style_reference"):
+                    candidate = Path(metadata.get("style_reference_path", ""))
+                    if candidate.is_file():
+                        input_paths.append(candidate)
+                if output_type == OUTPUT_HERO and style.get("plan_image_path"):
+                    plan_path = Path(style["plan_image_path"])
+                    if plan_path.is_file():
+                        input_paths.append(plan_path)
+                snapshot, fingerprint = self._snapshot_for(
+                    conn, style=style, output_type=output_type, prompt=prompt,
+                    negative_prompt=bundle.negative_prompt, prompt_version=version,
+                    provider=provider_name, model=model,
+                    size=self._size_for_output(output_type),
+                    profile_row=profile_row, input_paths=input_paths,
+                    asset_kind="plan" if output_type == OUTPUT_HERO else "reference",
+                    extra={
+                        "pending_reference_intent": sorted(
+                            k for k in ("use_reference", "use_hero_reference",
+                                        "use_style_reference")
+                            if metadata.get(k)
+                        ),
+                        "waits_for_grid": bool(wait_for),
+                    },
+                )
                 conn.execute(
                     "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
                     " negative_prompt, prompt_version, provider, model, status, retry_count,"
                     " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
-                    " created_at, updated_at, root_task_id, metadata_json)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " created_at, updated_at, root_task_id, input_fingerprint, metadata_json)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         task_id,
                         batch_id,
@@ -344,9 +432,13 @@ class TaskService:
                         now,
                         now,
                         root_task_id,
+                        fingerprint,
                         json.dumps(metadata, ensure_ascii=False),
                     ),
                 )
+                # Same transaction: a task must never exist without the record of
+                # what it was built from.
+                store_snapshot_locked(conn, task_id, snapshot, fingerprint)
                 if root_override is None:
                     open_lineage_locked(
                         conn, self.config, root_task_id=task_id, style_id=style_id,
@@ -418,6 +510,29 @@ class TaskService:
         estimate["budget"] = spend_snapshot(self.db, self.config).as_dict()
         return estimate
 
+    def _matrix_input_paths(self, conn, style: dict, tone: str, view: str) -> list[Path]:
+        """Design authority then hand model, in the order the provider receives
+        them (Image 1 = design, Image 2 = base hand)."""
+        paths: list[Path] = []
+        plan = Path(style.get("plan_image_path") or "")
+        if plan.is_file():
+            paths.append(plan)
+        else:
+            grid = conn.execute(
+                "SELECT output_path FROM tasks WHERE style_id = ? AND output_type = ?"
+                " AND status = ? ORDER BY completed_at DESC LIMIT 1",
+                (style["style_id"], OUTPUT_GRID, SUCCESS),
+            ).fetchone()
+            if grid and grid["output_path"] and Path(grid["output_path"]).is_file():
+                paths.append(Path(grid["output_path"]))
+        hand = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (f"hand_model_{tone}_{view}",),
+        ).fetchone()
+        if hand and Path(hand["value"]).is_file():
+            paths.append(Path(hand["value"]))
+        return paths
+
     def _matrix_axes(self, tones: list[str] | None,
                      views: list[str] | None) -> tuple[list[str], list[str]]:
         tones = [t for t in (tones or MATRIX_TONES) if t in MATRIX_TONES]
@@ -444,7 +559,8 @@ class TaskService:
         style = self.get_style(style_id)
         spec = self.spec_for(style)
         tones, views = self._matrix_axes(tones, views)
-        provider_name, model, price, profile_name = self._generation_channel()
+        provider_name, model, price, profile_row = self._generation_channel_row()
+        profile_name = profile_row["name"] if profile_row else None
         use_refs = self.config.reference_mode != "off"
 
         estimate = self.estimate_matrix(style_id, tones=tones, views=views, force=force)
@@ -507,19 +623,33 @@ class TaskService:
                         metadata["api_profile"] = profile_name
                     if use_refs:
                         metadata["use_matrix_reference"] = True
+                    # A cell's inputs exist now: the design authority (plan or the
+                    # latest grid) and the tone+view hand model. Freezing them by
+                    # digest is what makes a re-upload unable to rewrite history.
+                    cell_inputs = self._matrix_input_paths(conn, style, tone, view)
+                    snapshot, fingerprint = self._snapshot_for(
+                        conn, style=style, output_type=OUTPUT_MATRIX_CELL, prompt=prompt,
+                        negative_prompt="", prompt_version=MATRIX_PROMPT_VERSION,
+                        provider=provider_name, model=model,
+                        size=self.config.wearing_size, profile_row=profile_row,
+                        input_paths=cell_inputs, asset_kind="hand_model",
+                        extra={"tone": tone, "view": view},
+                    )
                     conn.execute(
                         "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
                         " negative_prompt, prompt_version, provider, model, status, retry_count,"
                         " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
-                        " created_at, updated_at, root_task_id, metadata_json)"
-                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        " created_at, updated_at, root_task_id, input_fingerprint, metadata_json)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             task_id, batch_id, style_id, style["sku"], OUTPUT_MATRIX_CELL,
                             prompt, "", MATRIX_PROMPT_VERSION, provider_name, model,
                             PENDING, 0, self.config.max_retries, price, key, None,
-                            now, now, task_id, json.dumps(metadata, ensure_ascii=False),
+                            now, now, task_id, fingerprint,
+                            json.dumps(metadata, ensure_ascii=False),
                         ),
                     )
+                    store_snapshot_locked(conn, task_id, snapshot, fingerprint)
                     # Each cell is its own root: cells are independent assets, so
                     # one cell's corrections must not consume another's allowance.
                     open_lineage_locked(
@@ -591,7 +721,8 @@ class TaskService:
                 f"Pass owner_override to continue."
             )
 
-        provider_name, model, price, profile_name = self._generation_channel()
+        provider_name, model, price, profile_row = self._generation_channel_row()
+        profile_name = profile_row["name"] if profile_row else None
         prompt = build_correction_prompt(source["prompt"], correction_text, len(details))
         conn = self.db.conn()
         batch_id = new_batch_id()
@@ -619,12 +750,33 @@ class TaskService:
                 "INSERT INTO batches (batch_id, note, created_at) VALUES (?,?,?)",
                 (batch_id, f"correction v{version} of {task_id}", now),
             )
+            # A correction's inputs are the locked base image plus any detail
+            # references, all of which exist now.
+            correction_inputs = [Path(source["output_path"])]
+            correction_inputs.extend(details)
+            snapshot, fingerprint = self._snapshot_for(
+                conn, style=self.get_style(source["style_id"]),
+                output_type=source["output_type"], prompt=prompt,
+                negative_prompt=source["negative_prompt"],
+                prompt_version=source["prompt_version"],
+                provider=provider_name, model=model,
+                size=self._size_for_output(source["output_type"]),
+                profile_row=profile_row, input_paths=correction_inputs,
+                asset_kind="correction_detail",
+                extra={
+                    "correction_of": task_id,
+                    "version": version,
+                    # The instruction is an input: the same base image with a
+                    # different instruction is a different task.
+                    "correction_text": correction_text.strip()[:2000],
+                },
+            )
             conn.execute(
                 "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
                 " negative_prompt, prompt_version, provider, model, status, retry_count,"
                 " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
-                " created_at, updated_at, root_task_id, metadata_json)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " created_at, updated_at, root_task_id, input_fingerprint, metadata_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     new_id_, batch_id, source["style_id"], source["sku"],
                     source["output_type"], prompt, source["negative_prompt"],
@@ -632,10 +784,11 @@ class TaskService:
                     self.config.max_retries, price,
                     self.idempotency_key(source["style_id"], source["output_type"],
                                          source["prompt_version"], prompt, batch_id),
-                    None, now, now, root_task_id,
+                    None, now, now, root_task_id, fingerprint,
                     json.dumps(metadata, ensure_ascii=False),
                 ),
             )
+            store_snapshot_locked(conn, new_id_, snapshot, fingerprint)
             # A manual correction of a task that predates the ledger needs a
             # lineage to draw on; opening it here keeps old assets correctable.
             open_lineage_locked(

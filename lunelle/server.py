@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from PIL import Image, UnidentifiedImageError
 
 from . import __version__
+from .assets import assets_root, store_bytes
 from .budget import BudgetExceeded, spend_snapshot
 from .config import Config, load_config
 from .db import Database, db_healthy, migrate
@@ -46,6 +48,7 @@ from .schemas import (
     StyleCreateRequest,
     TryonIdRequest,
 )
+from .snapshots import find_by_fingerprint, get_executions, get_snapshot
 from .stats import collect_stats
 from .styles import StyleInputError, build_style_spec
 from .tasks import ConflictError, NotFoundError, TaskService
@@ -509,6 +512,44 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         """Rolling-window spend against the cap. Admin-only: it reveals business volume."""
         return spend_snapshot(request.app.state.db, config).as_dict()
 
+    @app.get("/api/tasks/{task_id}/snapshot", dependencies=[Depends(require_admin)])
+    def task_snapshot(task_id: str, request: Request):
+        """Frozen inputs for this task, plus what each attempt actually sent.
+
+        Admin-only: a snapshot contains the full prompt and the channel's identity.
+        Tasks created before snapshots existed report `available: false` rather than
+        a synthesized snapshot — a fabricated one would be indistinguishable from a
+        real one while being a guess.
+        """
+        service: TaskService = request.app.state.service
+        service.get_task(task_id, with_details=False)  # 404 if missing
+        db: Database = request.app.state.db
+        record = get_snapshot(db, task_id)
+        if record is None:
+            return {"task_id": task_id, "available": False,
+                    "reason": "task predates input snapshots"}
+        return {
+            "task_id": task_id,
+            "available": True,
+            "input_fingerprint": record["input_fingerprint"],
+            "snapshot_version": record["snapshot_version"],
+            "created_at": record["created_at"],
+            "snapshot": record["snapshot"],
+            # What actually reached the provider, per attempt. Differs from the
+            # plan when a reference was missing and the prompt was stripped.
+            "executions": get_executions(db, task_id),
+        }
+
+    @app.get("/api/fingerprints/{fingerprint}", dependencies=[Depends(require_admin)])
+    def fingerprint_lookup(fingerprint: str, request: Request):
+        """Every task built from exactly these inputs — the reproducibility check."""
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise HTTPException(status_code=422,
+                                detail="fingerprint must be 64 lowercase hex chars")
+        matches = find_by_fingerprint(request.app.state.db, fingerprint)
+        return {"input_fingerprint": fingerprint, "count": len(matches),
+                "tasks": matches}
+
     @app.get("/api/tasks/{task_id}/lineage", dependencies=[Depends(require_admin)])
     def task_lineage(task_id: str, request: Request):
         """Shared automatic-work budget for this task's lineage.
@@ -752,9 +793,12 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         _check_cell(tone, view)
         data = await file.read(config.max_upload_mb * 1024 * 1024 + 1)
         fmt, ext = _validated_upload(data)
-        dest = config.upload_dir / "hand-models" / f"{tone}-{view}{ext}"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
+        # Content-addressed: this used to write a fixed `{tone}-{view}.png`, so
+        # re-uploading silently replaced the bytes that past matrix cells had been
+        # generated from. Now a new upload lands at a new path and the old one
+        # keeps serving the old bytes, so snapshots stay truthful.
+        ref = store_bytes(request.app.state.db, config, data,
+                          kind="hand_model", ext=ext)
         from .db import transaction, utcnow
         conn = request.app.state.db.conn()
         with transaction(conn):
@@ -762,10 +806,10 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
                 "INSERT INTO app_settings (key, value, updated_at) VALUES (?,?,?)"
                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
                 " updated_at = excluded.updated_at",
-                (f"hand_model_{tone}_{view}", str(dest), utcnow()),
+                (f"hand_model_{tone}_{view}", str(ref.path), utcnow()),
             )
-        return {"tone": tone, "view": view, "stored": dest.name,
-                "format": fmt, "bytes": len(data)}
+        return {"tone": tone, "view": view, "stored": ref.path.name,
+                "digest": ref.digest, "format": fmt, "bytes": len(data)}
 
     @app.get("/api/settings/hand-models/{tone}/{view}/image")
     def hand_model_image(tone: str, view: str, request: Request):
@@ -774,7 +818,10 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         if not path_text or not Path(path_text).is_file():
             raise HTTPException(status_code=404, detail="hand model not configured")
         path = Path(path_text).resolve()
-        if not path.is_relative_to(config.upload_dir.resolve()):
+        # Two valid roots now: the content-addressed store (new uploads) and the
+        # legacy upload dir (hand models registered before the store existed).
+        allowed_roots = (assets_root(config).resolve(), config.upload_dir.resolve())
+        if not any(path.is_relative_to(root) for root in allowed_roots):
             raise HTTPException(status_code=403, detail="path outside storage root")
         return FileResponse(path)
 
