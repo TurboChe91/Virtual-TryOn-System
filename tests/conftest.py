@@ -47,6 +47,11 @@ def make_config(tmp_path: Path, **overrides) -> Config:
         auto_regen_max=0,  # deterministic tests; production defaults to 1
         max_upload_mb=2,
         disable_provider_watermark=True,
+        # Cost controls off by default so existing tests are unaffected; the
+        # budget/confirmation tests set them explicitly.
+        daily_budget_usd=0.0,
+        confirm_cost_usd=0.0,
+        allow_private_api_hosts=False,
         pricing_usd=dict(DEFAULT_PRICING_USD),
     )
     defaults.update(overrides)

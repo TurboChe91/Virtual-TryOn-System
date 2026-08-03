@@ -23,6 +23,7 @@ from .config import Config
 from .db import Database
 from .logging_setup import redact
 from .profiles import ProfileService
+from .urlguard import assert_safe_request_url
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,11 @@ def build_llm_chat(config: Config, db: Database) -> ChatFn:
         )
 
     def chat(system: str, user: str, images: list[Path]) -> str:
+        # Re-validated per call: the profile is operator-editable and DNS can
+        # change between write and use.
+        assert_safe_request_url(
+            base_url, allow_private=config.allow_private_api_hosts
+        )
         content: list[dict] = [{"type": "text", "text": user}]
         for image in images:
             content.append({"type": "image_url", "image_url": {"url": _data_url(image)}})

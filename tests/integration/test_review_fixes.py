@@ -216,5 +216,6 @@ class TestProductionConfigGuards:
             tmp_path, env="production", image_provider="openai-compat",
             image_api_base_url="https://x.example/v1", image_api_key="sk-real",
             image_model="m", admin_token="strong-token",
+            daily_budget_usd=20.0,  # production also requires a spend cap
         )
         assert not config.validate_for_serve()

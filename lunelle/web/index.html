@@ -212,6 +212,7 @@
     <a href="/settings"><span class="k">S</span>设置</a>
   </nav>
   <div class="side-foot" id="sideFoot">—</div>
+  <div class="side-foot" id="budgetLine" style="padding-top:0"></div>
 </aside>
 
 <div class="content">
@@ -533,15 +534,55 @@ async function saveIdentity(styleId){
     toast('已保存'); $('#modal').style.display='none'; loadStyles();
   } catch(e){ toast('保存失败：' + e.message, 6000); }
 }
+// 试戴矩阵最多一次产生 16 张付费图，所以先向服务端要真实报价（免费、不排队），
+// 把金额摆在操作者面前，再把同一个数字回传作为授权凭据。
 async function generateMatrix(styleId){
-  if (!confirm('生成试戴矩阵：4 种肤色 × 4 个视角，共 16 张。继续？')) return;
+  let est;
   try {
-    const gen = await api(`/api/styles/${styleId}/matrix`,
+    est = await api(`/api/styles/${styleId}/matrix/estimate`,
       {method:'POST', body: JSON.stringify({})});
+  } catch(e){ toast('无法获取报价：' + e.message, 6000); return; }
+
+  if (est.image_count === 0){
+    toast(`无需出图：${est.cells_already_succeeded} 格已有成品、` +
+          `${est.cells_in_progress} 格正在生成`, 6000);
+    return;
+  }
+  const b = est.budget;
+  const budgetLine = b.enabled
+    ? `\n\n24 小时预算：已用 $${b.realized_usd.toFixed(4)}、` +
+      `已排队 $${b.committed_usd.toFixed(4)}、剩余 $${b.remaining_usd.toFixed(4)}` +
+      `（上限 $${b.limit_usd.toFixed(2)}）`
+    : '\n\n未设置预算上限（LUNELLE_DAILY_BUDGET_USD=0）';
+  const lines =
+    `确认生成试戴矩阵？\n\n` +
+    `本次出图：${est.image_count} 张（请求 ${est.cells_requested} 格，` +
+    `已有成品 ${est.cells_already_succeeded} 格，进行中 ${est.cells_in_progress} 格）\n` +
+    `预计费用：$${est.estimated_usd.toFixed(4)}\n` +
+    `最坏情况：$${est.worst_case_usd.toFixed(4)}（${est.worst_case_note}）` +
+    budgetLine;
+  if (!confirm(lines)) return;
+
+  try {
+    const gen = await api(`/api/styles/${styleId}/matrix`, {method:'POST',
+      // 回传报价金额作为授权：报价若已变动，服务端会拒绝并要求重新确认。
+      body: JSON.stringify({confirm_estimated_usd: est.estimated_usd})});
     toast(`试戴矩阵已排队 ${gen.created.length} 格` +
       (gen.skipped.length ? `，${gen.skipped.length} 格已有成品` : ''));
-    loadTasks(); loadMetrics();
-  } catch(e){ toast('排队失败：' + e.message, 6000); }
+    loadTasks(); loadMetrics(); loadBudget();
+  } catch(e){ toast('排队失败：' + e.message, 8000); }
+}
+
+async function loadBudget(){
+  const el = $('#budgetLine');
+  if (!el) return;
+  try {
+    const b = await api('/api/budget');
+    if (!b.enabled){ el.textContent = ''; return; }
+    const pct = b.limit_usd > 0 ? Math.min(100, 100 * b.total_usd / b.limit_usd) : 0;
+    el.innerHTML = `24h 费用 <b>$${b.total_usd.toFixed(4)}</b> / $${b.limit_usd.toFixed(2)}` +
+      (pct >= 80 ? ` <span style="color:var(--err)">（剩余 $${b.remaining_usd.toFixed(4)}）</span>` : '');
+  } catch(e){ el.textContent = ''; }
 }
 
 async function generateTypes(styleId, types){
@@ -690,9 +731,9 @@ async function doExport(){
   } catch(e){ toast('导出失败：' + e.message + '（导出默认只接受人工已确认的素材）', 9000); }
 }
 
-function refreshAll(){ loadStyles(); loadTasks(); loadMetrics(); }
+function refreshAll(){ loadStyles(); loadTasks(); loadMetrics(); loadBudget(); }
 refreshAll();
-setInterval(()=>{ loadTasks(); loadMetrics(); }, 5000);
+setInterval(()=>{ loadTasks(); loadMetrics(); loadBudget(); }, 5000);
 </script>
 </body>
 </html>

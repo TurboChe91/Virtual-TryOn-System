@@ -150,11 +150,17 @@ NON_RETRYABLE_ERROR_CODES = frozenset(
         # cell's tone+view). Retrying cannot help until an operator uploads it,
         # so this fails fast BEFORE spending money on a degraded render.
         "dependency_missing",
+        # The rolling spend cap would be exceeded. Not auto-retried: retrying
+        # would just trip the breaker again. Recovers via manual retry once the
+        # window rolls or the cap is raised.
+        "budget_exceeded",
     }
 )
 
 #: Error code used when a task cannot run because a required input is missing.
 ERROR_DEPENDENCY_MISSING = "dependency_missing"
+#: Error code used when the budget circuit breaker refuses a provider call.
+ERROR_BUDGET_EXCEEDED = "budget_exceeded"
 
 
 def is_retryable(error_code: str | None) -> bool:

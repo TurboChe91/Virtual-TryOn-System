@@ -14,7 +14,41 @@
 
 - 写操作（创建款式/生成/重试/取消/导出/上传/重跑 QA）在设置 `LUNELLE_ADMIN_TOKEN`
   后要求 `X-Admin-Token` 头，恒定时间比较（hmac.compare_digest）。生产必设。
-- 读接口无敏感数据（无密钥、无用户隐私）。
+- 读接口**大部分**无敏感数据（无密钥、无用户隐私），但以下读接口已改为需要管理员：
+  - `GET /api/settings/cloudflare` — token 已指纹化，但 account/database/bucket ID
+    本身指向生产基础设施
+  - `GET /api/budget` — 开销数字反映业务量
+- 凭证可撤销：`DELETE /api/settings/cloudflare`。保存接口把留空字段当作「保持原值」
+  （便于部分更新时不必重发 token），因此保存本身无法撤销，撤销必须是独立操作。
+
+## 出网请求安全（SSRF）
+
+API Profile 由运营者在运行时编辑，而服务端会向其发起请求，其中
+`POST /api/profiles/{id}/test` 会回显响应体前 200 字节 —— 「攻击者可控 URL + 响应回显」
+即构成可读 SSRF。`lunelle/urlguard.py` 在写入时与每次外发请求前校验：
+
+- 强制 https；`http`/`file`/`gopher` 等一律拒绝
+- 拒绝 URL 内嵌凭证（会泄进日志、错误串、Referer）
+- 拒绝解析到 loopback / 私有 / link-local / reserved / multicast 的主机，
+  包含 IPv4-mapped IPv6（`::ffff:127.0.0.1`）与 6to4 形式；
+  `169.254.169.254`（云元数据）是把 SSRF 升级为凭证窃取的关键载荷
+- 所有解析结果都必须合规：一个域名同时解析到公网与内网地址即拒绝
+- `httpx` 全程 `follow_redirects=False`：302 跳转到内网地址会绕过首个 URL 的校验
+- `LUNELLE_ALLOW_PRIVATE_API_HOSTS=1` 为自建模型场景放行私有地址，
+  **生产环境启动校验直接拒绝**
+
+**已知边界（未掩盖）**：校验时与请求时之间 DNS 可能变化（DNS rebinding）。
+完整防护需在 HTTP 客户端做连接期 IP 钉定；当前通过「每次请求前重新校验」把窗口压到最小。
+另：无法解析的域名**不拦**——它连不上，因此不是 SSRF 通道，且把 DNS 故障当成永久配置
+错误会误判（provider 层将 DNS 失败归类为可重试的 `dns` 错误，那才是正确行为）。
+
+## 成本安全
+
+- 滚动 24h 预算熔断 `LUNELLE_DAILY_BUDGET_USD`（生产必须 > 0）。排队时与 worker 调用
+  provider **之前**双重检查，触发代价为 0 次付费调用。
+- 超过 `LUNELLE_CONFIRM_COST_USD` 的批次必须回传预览金额授权；金额变动即拒绝，
+  防止「预览便宜、下单变贵」。
+- 一次点击最多产生 16 张付费图（试戴矩阵），现已必经预览与确认。
 - 无默认账号/密码、无测试后门、无无保护删除接口（系统根本没有删除接口 —— 资产不可变，重生成走新版本）。
 - 重试有状态守卫：success 任务不可重试/取消；重复生成默认幂等去重，force 是显式动作。
 

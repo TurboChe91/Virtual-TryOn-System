@@ -190,10 +190,29 @@ CHECK 生效、重复执行为空操作。
 - 测试：新增 `tests/integration/test_review_closure.py`、`tests/unit/test_gating.py`，
   竞态测试重复 ≥100 次
 
-### 第二阶段 成本与安全
-`config.py`（预算上限）、`schemas.py`+`profiles.py`（HTTPS/SSRF）、`server.py`
-（CF 接口鉴权、凭证清除）、`cloudflare.py`、`scripts/setup.sh`（.env 权限 600）、
-`web/index.html`（矩阵费用预览与二次确认）
+### 第二阶段 成本与安全（已实施）
+
+| 项 | 实现 | 验证 |
+|---|---|---|
+| a. 费用预览 | `POST /{id}/matrix/estimate` 免费、不排队，只报增量格数 | `test_estimate_queues_nothing_and_prices_the_batch`、`test_estimate_prices_only_the_incremental_cells` |
+| a. 二次确认 | 超过 `LUNELLE_CONFIRM_COST_USD` 必须回传 `confirm_estimated_usd`，金额变动即拒 | `test_expensive_batch_needs_confirmation`、`test_stale_confirmation_is_refused` |
+| a. 预算熔断 | 排队时（含在途）与 worker 调用前（仅已实现开销）双重检查 | `test_queue_time_breaker_refuses_and_queues_nothing`、`test_worker_breaker_spends_nothing_when_tripped`（`provider.calls == 0`） |
+| b. HTTPS | 原已存在于 `profiles.py`（我上一轮的审查结论有误，已更正） | `test_urlghard` 全组 scheme 用例 |
+| b. SSRF | 新 `urlguard.py`：拒 loopback/private/link-local/reserved、IPv4-mapped、URL 内嵌凭证 | 17 组实测全部符合预期；含 `169.254.169.254` |
+| c. CF 接口鉴权 | `GET /api/settings/cloudflare` 加 `require_admin`；新增 `DELETE` 清除凭证 | `test_reading_settings_requires_admin`、`test_credentials_can_be_cleared` |
+| 附带：.env 权限 | `setup.sh` umask+chmod 600；`cli init` 检测并告警 | 实测 644→600，告警文案已验证 |
+
+两个熔断点的口径**故意不同**（`budget.py` 模块注释有完整说明）：排队时把在途任务
+计入，防止多批次累加超支；worker 只计已实现开销加当前任务，否则任何大于剩余预算的
+批次会被自己的队列卡死。
+
+SSRF 的一个**已知边界**（写在 `urlguard.py` 里而不是掩盖）：DNS 在校验时与请求时
+之间可能变化（DNS rebinding），完整防护需要在 HTTP 客户端里做连接期 IP 钉定。
+当前做法是在每次外发请求前重新校验，把窗口压到最小。
+
+另一个刻意的判断：**无法解析的域名不视为不安全**。它连不上，因此不是 SSRF 通道；
+而把 DNS 故障当成永久配置错误会误判——provider 层本来就把 DNS 失败归类为可重试的
+`dns` 错误，那才是正确行为。
 
 ### 第三阶段 快照与版本冻结
 迁移 0006、`tasks.py`（input_fingerprint、lineage、依赖失败传播）、`publish.py`

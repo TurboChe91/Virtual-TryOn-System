@@ -17,10 +17,12 @@ import threading
 import time
 from pathlib import Path
 
+from .budget import BudgetExceeded, check_can_spend
 from .config import Config
 from .db import Database
 from .logging_setup import task_logger
 from .models import (
+    ERROR_BUDGET_EXCEEDED,
     ERROR_DEPENDENCY_MISSING,
     OUTPUT_GRID,
     OUTPUT_HERO,
@@ -160,6 +162,24 @@ class Worker:
                 detail_path = Path(detail)
                 if detail_path.is_file():
                     references.append(detail_path)
+        # Budget breaker, re-checked here rather than only at queue time: a batch
+        # authorized an hour ago must not be able to spend money the budget no
+        # longer allows. Checked before the provider call, so tripping costs zero.
+        try:
+            check_can_spend(
+                self.db, self.config,
+                task_cost_usd=float(task.get("estimated_cost_usd") or 0.0),
+            )
+        except BudgetExceeded as exc:
+            log.warning("budget breaker refused this task",
+                        ctx={"stage": "budget", "error_code": ERROR_BUDGET_EXCEEDED,
+                             "status": f"remaining={exc.snapshot.remaining_usd}"})
+            self.service.complete_failure(
+                task["task_id"], error_code=ERROR_BUDGET_EXCEEDED,
+                error_message=str(exc), retryable=False,
+            )
+            return
+
         prompt = task["prompt"]
         expected_reference = (
             task["metadata"].get("use_reference")

@@ -85,6 +85,11 @@ server {
 - 生产必须设置 `LUNELLE_ADMIN_TOKEN`，写操作要求 `X-Admin-Token` 头。
 - CORS：默认未开放跨域（同源管理页无需）；如需第三方前端接入，在反代层按需放行。
 - SQLite 无网络端口，不存在数据库端口暴露问题。
+- `.env` 权限必须 600（内含真实密钥）。`scripts/setup.sh` 会 chmod，
+  `python -m lunelle.cli init` 会在权限过宽时告警。
+- 生产启动校验强制项（`config.validate_for_serve`，不满足则拒绝启动）：
+  `LUNELLE_ADMIN_TOKEN` 非空、`LUNELLE_DEBUG=0`、`LUNELLE_DAILY_BUDGET_USD > 0`、
+  `LUNELLE_ALLOW_PRIVATE_API_HOSTS=0`、镜像 API 走 https、不使用 mock provider。
 
 ## D. 全新环境验证记录（2026-07-26）
 

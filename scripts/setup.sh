@@ -17,8 +17,18 @@ if [ "${WITH_DEV:-0}" = "1" ]; then
 fi
 
 if [ ! -f .env ]; then
-  cp .env.example .env
+  # umask before copy so the key is never briefly world-readable on disk.
+  (umask 077 && cp .env.example .env)
   echo ">>> .env created from template — edit it and set LUNELLE_IMAGE_API_KEY."
+fi
+
+# .env holds a live API key; owner-only regardless of how it got here.
+if [ -f .env ]; then
+  chmod 600 .env || echo ">>> WARNING: could not chmod 600 .env"
+  perms=$(stat -f "%Lp" .env 2>/dev/null || stat -c "%a" .env 2>/dev/null || echo "?")
+  if [ "$perms" != "600" ]; then
+    echo ">>> WARNING: .env permissions are $perms, expected 600 (it contains an API key)"
+  fi
 fi
 
 .venv/bin/python -m lunelle.cli init || {

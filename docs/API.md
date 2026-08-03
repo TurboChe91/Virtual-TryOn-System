@@ -62,6 +62,27 @@ Base URL: `http://<host>:8300`。写操作在设置 `LUNELLE_ADMIN_TOKEN` 后需
 `/api/tasks/{id}` 另外返回 `qa`（**heuristic** 判定，闸门只认这一条）与
 `qa_advisory`（LLM 判定，仅供参考，永不放行）。
 
+## 费用控制
+
+`POST /api/styles/{style_id}/matrix/estimate` — body 同 `/matrix`；**免费、不排队**。
+返回 `image_count`（只算真正会新建的格）、`estimated_usd`、`worst_case_usd`（含重试与
+自动返修的最坏情况）、`cells_already_succeeded`、`cells_in_progress`、
+`requires_confirmation`、`budget`。
+
+`POST /api/styles/{style_id}/matrix` — 估算金额 ≥ `LUNELLE_CONFIRM_COST_USD` 时必须带
+`confirm_estimated_usd`，且必须与当前估算一致：
+
+- 409 `cost_confirmation_required` — 未确认；响应含 `estimate` 供前端展示
+- 409 `cost_confirmation_mismatch` — 确认金额与当前报价不符（预览后价格变了）
+- 429 `budget_exceeded` — 会超出滚动 24h 预算；响应含 `budget` 快照。**整批拒绝，
+  不会部分排队**
+
+`GET /api/budget` — 滚动窗口开销快照（`realized_usd` 已实现、`committed_usd` 在途、
+`remaining_usd`、`limit_usd`、`enabled`）。需要管理员：开销数字反映业务量。
+
+预算熔断在 worker 调用 provider **之前**再检查一次，因此触发的代价是 0 次付费调用，
+任务以非重试的 `budget_exceeded` 失败，窗口滚动或上调上限后可手动重试。
+
 ## 批次 / 统计 / 导出
 
 `GET /api/batches` — 批次汇总（任务数/成功/失败）。
@@ -77,6 +98,33 @@ published}`。任一条缺失即视为拒绝（`NULL` 一律判为拒绝）。
 
 `include_unreviewed` 参数**已移除**：默认拒绝下它没有合法语义。旧客户端继续发送
 会收到 422（schema 为 `extra="forbid"`），而不是静默得到与预期相反的结果。
+
+## 通道 Profile 与设置
+
+`GET /api/profiles?kind=image|llm` — 列出通道；`api_key` 只返回指纹与末 4 位。
+`POST /api/profiles` / `PUT /api/profiles/{id}` / `DELETE /api/profiles/{id}`
+`POST /api/profiles/{id}/activate` / `POST /api/profiles/deactivate`
+`POST /api/profiles/{id}/test` — 只读连通性探测（`GET {base_url}/models`），不产生图片费用。
+
+**`base_url` 的出网限制**（`lunelle/urlguard.py`，422 `unsafe_url`）：
+
+- 必须 https（http 一律拒绝，即使开了下面的开关）
+- 不得内嵌凭证（`https://user:pass@…`）——会泄进日志与错误串
+- 主机不得解析到 loopback / 私有 / link-local / reserved 空间，其中
+  `169.254.169.254` 是把 SSRF 变成凭证窃取的关键载荷
+- `LUNELLE_ALLOW_PRIVATE_API_HOSTS=1` 可放行私有地址（自建模型场景），**生产环境拒绝**
+- 写入时校验，每次外发请求前再校验一次；无法解析的域名**不拦**（连不上即非通道，
+  且 DNS 故障应归类为可重试的传输错误）
+
+`GET /api/settings/cloudflare` — **需要管理员**：token 已指纹化，但 account /
+database / bucket ID 本身就指向生产基础设施。
+`POST /api/settings/cloudflare` — 部分更新，**留空字段表示保持原值**（因此保存无法撤销）。
+`DELETE /api/settings/cloudflare` — 真正清除全部凭证，返回被删除的键名。
+`POST /api/settings/cloudflare/test` — 只读探测 D1 与 R2 绑定。
+
+`GET /api/settings/hand-models` / `POST /api/settings/hand-models/{tone}/{view}`
+— 手模底图（4 肤色 × 4 视角）。缺失时矩阵任务以 `dependency_missing` 阻塞，
+不会静默降级。
 
 ## CLI 对照
 

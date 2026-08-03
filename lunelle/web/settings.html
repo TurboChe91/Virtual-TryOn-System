@@ -205,8 +205,11 @@
       <div class="flex" style="margin-top:14px">
         <button class="sm" onclick="saveCf()">保存</button>
         <button class="sm quiet" onclick="testCf()">测试连接</button>
+        <button class="sm link" onclick="clearCf()">清除凭证</button>
         <span class="muted" id="cfState" style="font-size:12.5px"></span>
       </div>
+      <p class="muted" style="font-size:12px; margin:10px 0 0">
+        留空字段表示保持现有值，因此「保存」无法撤销凭证；要真正移除请用「清除凭证」。</p>
     </div>
   </div>
 
@@ -378,6 +381,15 @@ async function testCf(){
     if (r.ok) toast('连通正常：D1 表 ' + (r.d1.tables||[]).join('、') + '，R2 可访问', 8000);
     else toast('测试未通过：D1 ' + (r.d1.ok?'正常':'失败') + '，R2 ' + (r.r2.ok?'正常':'失败'), 9000);
   } catch(e){ toast('测试失败：' + e.message, 7000); }
+}
+async function clearCf(){
+  if (!confirm('清除已保存的 Cloudflare 凭证？清除后将无法发布，需重新填写。')) return;
+  try {
+    await api('/api/settings/cloudflare', {method:'DELETE'});
+    $('#cf_account').value = ''; $('#cf_token').value = '';
+    $('#cf_d1').value = ''; $('#cf_bucket').value = '';
+    toast('凭证已清除'); loadCf();
+  } catch(e){ toast('清除失败：' + e.message, 6000); }
 }
 
 loadProfiles(); loadTones(); loadCf();

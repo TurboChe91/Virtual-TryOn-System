@@ -62,7 +62,16 @@ from .schemas import StyleSpec
 logger = logging.getLogger(__name__)
 
 
-from .errors import ConflictError, NotFoundError  # noqa: E402  (re-export for callers)
+from .budget import (  # noqa: E402
+    check_can_queue,
+    estimate_plan,
+    spend_snapshot,
+)
+from .errors import (  # noqa: E402  (re-exported for callers)
+    ConflictError,
+    CostConfirmationRequired,
+    NotFoundError,
+)
 
 CORRECTION_BUDGET = 5  # authorized versions per style+output_type (v1..v5), per SOP
 
@@ -335,21 +344,94 @@ class TaskService:
         )
         return GenerationPlan(batch_id=batch_id, created=created, reused=reused, skipped=skipped)
 
-    def create_matrix_generation(
-        self, style_id: str, *, tones: list[str] | None = None,
-        views: list[str] | None = None, force: bool = False, note: str = ""
-    ) -> GenerationPlan:
-        """Queue the try-on matrix for one style: every tone x view cell."""
+    def estimate_matrix(self, style_id: str, *, tones: list[str] | None = None,
+                        views: list[str] | None = None, force: bool = False) -> dict:
+        """Price a matrix batch WITHOUT queueing anything.
+
+        Counts only cells that would actually be created: re-running a matrix
+        where most cells already succeeded should quote the incremental cost, not
+        the full 16, or the operator learns to ignore the number.
+        """
         from .models import OUTPUT_MATRIX_CELL
 
         style = self.get_style(style_id)
         spec = self.spec_for(style)
+        tones, views = self._matrix_axes(tones, views)
+        _, _, price, _ = self._generation_channel()
+        use_refs = self.config.reference_mode != "off"
+
+        conn = self.db.conn()
+        would_create = 0
+        already_done = 0
+        in_progress = 0
+        for tone in tones:
+            for view in views:
+                prompt = build_matrix_prompt(
+                    spec, style.get("identity_text"), tone, view, with_reference=use_refs
+                )
+                key = self.idempotency_key(
+                    style_id, OUTPUT_MATRIX_CELL, MATRIX_PROMPT_VERSION, prompt,
+                    "FORCE" if force else "",
+                )
+                existing = conn.execute(
+                    "SELECT status FROM tasks WHERE idempotency_key = ?", (key,)
+                ).fetchone()
+                if existing is None:
+                    would_create += 1
+                elif existing["status"] == SUCCESS:
+                    already_done += 1
+                elif existing["status"] in (PENDING, RUNNING, RETRYING):
+                    in_progress += 1
+                else:
+                    would_create += 1  # failed/cancelled cells get re-queued
+        estimate = estimate_plan(self.config, image_count=would_create,
+                                 price_per_image=price)
+        estimate.update({
+            "style_id": style_id,
+            "sku": style["sku"],
+            "cells_requested": len(tones) * len(views),
+            "cells_already_succeeded": already_done,
+            "cells_in_progress": in_progress,
+            "tones": tones,
+            "views": views,
+        })
+        estimate["budget"] = spend_snapshot(self.db, self.config).as_dict()
+        return estimate
+
+    def _matrix_axes(self, tones: list[str] | None,
+                     views: list[str] | None) -> tuple[list[str], list[str]]:
         tones = [t for t in (tones or MATRIX_TONES) if t in MATRIX_TONES]
         views = [v for v in (views or MATRIX_VIEWS) if v in MATRIX_VIEWS]
         if not tones or not views:
             raise ValueError(f"tones must be within {MATRIX_TONES} and views within {MATRIX_VIEWS}")
+        return tones, views
+
+    def create_matrix_generation(
+        self, style_id: str, *, tones: list[str] | None = None,
+        views: list[str] | None = None, force: bool = False, note: str = "",
+        confirmed_usd: float | None = None,
+    ) -> GenerationPlan:
+        """Queue the try-on matrix for one style: every tone x view cell.
+
+        `confirmed_usd` is the figure the caller was shown by `estimate_matrix`.
+        Above LUNELLE_CONFIRM_COST_USD it must be supplied and must still match,
+        so a single click can never commit an unbounded spend, and a price change
+        between preview and submit re-prompts instead of silently charging more.
+        """
+        from .models import OUTPUT_MATRIX_CELL
+
+        style = self.get_style(style_id)
+        spec = self.spec_for(style)
+        tones, views = self._matrix_axes(tones, views)
         provider_name, model, price, profile_name = self._generation_channel()
         use_refs = self.config.reference_mode != "off"
+
+        estimate = self.estimate_matrix(style_id, tones=tones, views=views, force=force)
+        self._require_cost_authorization(estimate, confirmed_usd)
+        # Breaker at queue time: counts realized spend plus everything already
+        # queued, so many batches cannot collectively overrun the cap.
+        check_can_queue(self.db, self.config,
+                        additional_usd=estimate["estimated_usd"])
 
         conn = self.db.conn()
         batch_id = new_batch_id()
@@ -423,6 +505,29 @@ class TaskService:
                             "status": f"created={len(created)} skipped={len(skipped)}"}},
         )
         return GenerationPlan(batch_id=batch_id, created=created, reused=reused, skipped=skipped)
+
+    def _require_cost_authorization(self, estimate: dict,
+                                    confirmed_usd: float | None) -> None:
+        """Enforce the confirmation contract for an expensive batch."""
+        if not estimate["requires_confirmation"]:
+            return
+        quoted = estimate["estimated_usd"]
+        if confirmed_usd is None:
+            raise CostConfirmationRequired(
+                f"cost_confirmation_required: this batch generates "
+                f"{estimate['image_count']} image(s) at an estimated "
+                f"${quoted:.4f} (worst case ${estimate['worst_case_usd']:.4f}). "
+                f"Re-send with confirm_estimated_usd={quoted} to authorize.",
+                estimate,
+            )
+        # Tolerance of one hundredth of a cent absorbs float noise only.
+        if abs(float(confirmed_usd) - quoted) > 0.0001:
+            raise CostConfirmationRequired(
+                f"cost_confirmation_mismatch: you authorized "
+                f"${float(confirmed_usd):.4f} but the batch now costs "
+                f"${quoted:.4f}. Review the new estimate and confirm again.",
+                estimate,
+            )
 
     def create_correction(
         self,

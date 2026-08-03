@@ -14,10 +14,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from PIL import Image, UnidentifiedImageError
 
 from . import __version__
+from .budget import BudgetExceeded, spend_snapshot
 from .config import Config, load_config
 from .db import Database, db_healthy, migrate
+from .errors import CostConfirmationRequired
 from .export import ExportError, run_export
-from .logging_setup import setup_logging
+from .logging_setup import redact, setup_logging
 from .models import (
     OUTPUT_GRID,
     OUTPUT_HERO,
@@ -47,6 +49,7 @@ from .schemas import (
 from .stats import collect_stats
 from .styles import StyleInputError, build_style_spec
 from .tasks import ConflictError, NotFoundError, TaskService
+from .urlguard import UnsafeUrl, assert_safe_request_url
 from .worker import Worker
 
 logger = logging.getLogger(__name__)
@@ -73,7 +76,9 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         app.state.db = db
         app.state.service = service
         app.state.worker = worker
-        app.state.profiles = ProfileService(db)
+        app.state.profiles = ProfileService(
+            db, allow_private_hosts=config.allow_private_api_hosts
+        )
         if start_worker and os.environ.get("LUNELLE_DISABLE_WORKER") != "1":
             worker.start()
         logger.info(
@@ -125,6 +130,31 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
     @app.exception_handler(IllegalReviewTransition)
     async def _illegal_review(_req, exc):
         return JSONResponse(status_code=409, content={"error": str(exc)})
+
+    @app.exception_handler(CostConfirmationRequired)
+    async def _needs_confirmation(_req, exc):
+        # 409 + the estimate: the client is expected to show it and re-submit
+        # with confirm_estimated_usd, not to retry blindly.
+        return JSONResponse(
+            status_code=409,
+            content={"error": str(exc), "code": "cost_confirmation_required",
+                     "estimate": exc.estimate},
+        )
+
+    @app.exception_handler(BudgetExceeded)
+    async def _budget_exceeded(_req, exc):
+        # 429: the request is well-formed and authorized, but the spend cap for
+        # this window is used up. Retrying later (or raising the cap) is correct.
+        return JSONResponse(
+            status_code=429,
+            content={"error": str(exc), "code": "budget_exceeded",
+                     "budget": exc.snapshot.as_dict()},
+        )
+
+    @app.exception_handler(UnsafeUrl)
+    async def _unsafe_url(_req, exc):
+        return JSONResponse(status_code=422,
+                            content={"error": str(exc), "code": "unsafe_url"})
 
     @app.exception_handler(ConflictError)
     async def _conflict(_req, exc):
@@ -401,11 +431,27 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
 
     # ---------------- Cloudflare publish channel settings ----------------
 
-    @app.get("/api/settings/cloudflare")
+    @app.get("/api/settings/cloudflare", dependencies=[Depends(require_admin)])
     def cloudflare_settings(request: Request):
+        """Admin-only: the token is fingerprinted, but account/database/bucket
+        IDs are themselves sensitive — they name the production infrastructure."""
         from .cloudflare import cf_config_public
 
         return cf_config_public(request.app.state.db)
+
+    @app.delete("/api/settings/cloudflare", dependencies=[Depends(require_admin)])
+    def clear_cloudflare(request: Request):
+        """Remove stored credentials.
+
+        `save` treats blank fields as "keep existing" (so a partial update need
+        not resend the token), which left no way to revoke. This is that way.
+        """
+        from .cloudflare import clear_cf_config
+
+        cleared = clear_cf_config(request.app.state.db)
+        logger.info("cloudflare credentials cleared",
+                    extra={"ctx": {"stage": "settings", "status": f"keys={cleared}"}})
+        return {"cleared": cleared, "configured": False}
 
     @app.post("/api/settings/cloudflare", dependencies=[Depends(require_admin)])
     def save_cloudflare(body: CloudflareConfigRequest, request: Request):
@@ -423,6 +469,23 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
             raise HTTPException(status_code=409, detail="凭证不完整")
         return CloudflareClient(cf).test()
 
+    @app.post("/api/styles/{style_id}/matrix/estimate",
+              dependencies=[Depends(require_admin)])
+    def estimate_matrix(style_id: str, body: MatrixRequest, request: Request):
+        """Price a matrix batch without queueing anything.
+
+        Read-only and free. The UI calls this before showing the confirmation
+        dialog, so the figure the operator approves is the one the server will
+        enforce.
+        """
+        try:
+            return request.app.state.service.estimate_matrix(
+                style_id, tones=body.tones or None, views=body.views or None,
+                force=body.force,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/api/styles/{style_id}/matrix", status_code=202,
               dependencies=[Depends(require_admin)])
     def generate_matrix(style_id: str, body: MatrixRequest, request: Request):
@@ -430,11 +493,17 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
             plan = request.app.state.service.create_matrix_generation(
                 style_id, tones=body.tones or None, views=body.views or None,
                 force=body.force, note=body.note,
+                confirmed_usd=body.confirm_estimated_usd,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"batch_id": plan.batch_id, "created": plan.created,
                 "reused": plan.reused, "skipped": plan.skipped}
+
+    @app.get("/api/budget", dependencies=[Depends(require_admin)])
+    def budget(request: Request):
+        """Rolling-window spend against the cap. Admin-only: it reveals business volume."""
+        return spend_snapshot(request.app.state.db, config).as_dict()
 
     @app.get("/api/tasks")
     def list_tasks(request: Request,
@@ -596,23 +665,35 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
 
     @app.post("/api/profiles/{profile_id}/test", dependencies=[Depends(require_admin)])
     def test_profile(profile_id: str, request: Request):
-        """Cheap connectivity + auth probe: GET {base_url}/models, no image cost."""
+        """Cheap connectivity + auth probe: GET {base_url}/models, no image cost.
+
+        This endpoint echoes part of the response body, which makes it the
+        read-capable half of an SSRF if the URL is not constrained. The stored
+        URL was validated on write, but it is re-validated here: DNS may have
+        changed since, and `allow_private_api_hosts` may have been tightened.
+        """
         import httpx
 
         profiles: ProfileService = request.app.state.profiles
         row = profiles._get_row(profile_id)  # noqa: SLF001 - server needs the raw key once
+        assert_safe_request_url(
+            row["base_url"], allow_private=config.allow_private_api_hosts
+        )
         try:
             response = httpx.get(
                 f"{row['base_url']}/models",
                 headers={"Authorization": f"Bearer {row['api_key']}"},
                 timeout=15,
+                # No redirects: a 302 to 169.254.169.254 would bypass the check
+                # above, since only the first URL is ours to validate.
+                follow_redirects=False,
             )
         except httpx.HTTPError as exc:
-            return {"ok": False, "stage": "transport", "detail": str(exc)[:200]}
+            return {"ok": False, "stage": "transport", "detail": redact(str(exc))[:200]}
         if response.status_code != 200:
             return {"ok": False, "stage": "auth_or_endpoint",
                     "http_status": response.status_code,
-                    "detail": response.text[:200]}
+                    "detail": redact(response.text[:200])}
         model_present = None
         try:
             ids = [m.get("id") for m in response.json().get("data", [])]

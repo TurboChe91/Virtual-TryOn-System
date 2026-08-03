@@ -42,6 +42,23 @@ def _print(doc) -> None:
     print(json.dumps(doc, ensure_ascii=False, indent=2, default=str))
 
 
+def check_dotenv_permissions(path: str = ".env") -> str | None:
+    """Warn if .env is group/world-readable. It holds a live API key.
+
+    Reported rather than silently fixed: changing file modes out from under an
+    operator is surprising, and on a shared host the right answer might be
+    different ownership rather than a mode change.
+    """
+    candidate = Path(path)
+    if not candidate.is_file():
+        return None
+    mode = candidate.stat().st_mode & 0o777
+    if mode & 0o077:
+        return (f"{candidate} is mode {mode:03o}; it contains an API key. "
+                f"Run: chmod 600 {candidate}")
+    return None
+
+
 def cmd_init(config, _args) -> int:
     config.ensure_dirs()
     db = Database(config.db_path)
@@ -52,6 +69,9 @@ def cmd_init(config, _args) -> int:
     print(f"migrations applied now: {applied or 'none (up to date)'}")
     for directory in config.runtime_dirs():
         print(f"dir ok: {directory}")
+    dotenv_warning = check_dotenv_permissions()
+    if dotenv_warning:
+        print(f"\nWARNING: {dotenv_warning}")
     if problems:
         print("\nConfiguration problems (fix before serving):")
         for p in problems:

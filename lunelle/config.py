@@ -52,6 +52,19 @@ def _env_int(name: str, default: int, lo: int, hi: int) -> int:
     return value
 
 
+def _env_float(name: str, default: float, lo: float, hi: float) -> float:
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
+    if not lo <= value <= hi:
+        raise ConfigError(f"{name} must be between {lo} and {hi}, got {value}")
+    return value
+
+
 def _env_size(name: str, default: str) -> tuple[int, int]:
     raw = _env(name) or default
     m = _SIZE_RE.match(raw)
@@ -99,6 +112,16 @@ class Config:
     auto_regen_max: int
     max_upload_mb: int
     disable_provider_watermark: bool
+
+    # ---- cost controls ----
+    #: Rolling-24h spend cap in USD. 0 disables the breaker.
+    daily_budget_usd: float
+    #: Batches estimated at or above this must be confirmed by the caller. 0 = always allow.
+    confirm_cost_usd: float
+
+    # ---- outbound request safety ----
+    #: Permit API hosts on private/loopback ranges (self-hosted models). Refused in production.
+    allow_private_api_hosts: bool
 
     pricing_usd: dict[str, float] = field(default_factory=dict)
 
@@ -156,6 +179,17 @@ class Config:
             problems.append(
                 "LUNELLE_ADMIN_TOKEN is required in production; without it all "
                 "mutating (cost-incurring) endpoints would be unauthenticated."
+            )
+        if self.is_production and self.allow_private_api_hosts:
+            problems.append(
+                "LUNELLE_ALLOW_PRIVATE_API_HOSTS=1 is refused in production: it "
+                "lets an operator-editable profile point the server at internal "
+                "addresses (SSRF)."
+            )
+        if self.is_production and self.daily_budget_usd <= 0:
+            problems.append(
+                "LUNELLE_DAILY_BUDGET_USD must be > 0 in production; without a cap "
+                "a runaway batch can spend without bound."
             )
         return problems
 
@@ -238,5 +272,13 @@ def load_config(dotenv_path: str | os.PathLike | None = None) -> Config:
         auto_regen_max=_env_int("LUNELLE_AUTO_REGEN_MAX", 1, 0, 3),
         disable_provider_watermark=_env("LUNELLE_DISABLE_PROVIDER_WATERMARK", "1") == "1",
         max_upload_mb=_env_int("LUNELLE_MAX_UPLOAD_MB", 10, 1, 100),
+        # Default 20 USD/24h: roughly 400 seedream images or 40 full try-on
+        # matrices — generous for real work, but a bounded loss if something runs
+        # away. 0 disables the breaker entirely.
+        daily_budget_usd=_env_float("LUNELLE_DAILY_BUDGET_USD", 20.0, 0.0, 100000.0),
+        # A full 16-cell matrix is ~0.64 USD at seedream prices, so 0.50 puts the
+        # confirmation prompt in front of exactly the actions worth confirming.
+        confirm_cost_usd=_env_float("LUNELLE_CONFIRM_COST_USD", 0.50, 0.0, 100000.0),
+        allow_private_api_hosts=_env("LUNELLE_ALLOW_PRIVATE_API_HOSTS", "0") == "1",
         pricing_usd=pricing,
     )

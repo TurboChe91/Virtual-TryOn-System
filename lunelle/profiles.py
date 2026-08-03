@@ -21,6 +21,7 @@ from .errors import ConflictError, NotFoundError
 from .models import new_id
 from .providers import ImageProvider
 from .providers.openai_compat import OpenAICompatProvider, OpenAICompatSettings
+from .urlguard import UnsafeUrl, assert_safe_request_url, validate_outbound_url
 
 VALID_PROFILE_REFERENCE_MODES = ("auto", "seedream", "openai-edits", "off")
 
@@ -42,8 +43,25 @@ def _row_public(row: sqlite3.Row) -> dict:
 
 
 class ProfileService:
-    def __init__(self, db: Database):
+    """Profile CRUD.
+
+    `allow_private_hosts` comes from config: profiles are operator-editable and
+    two code paths make server-side requests to them, so the URL is validated
+    against SSRF here at write time rather than trusting callers.
+    """
+
+    def __init__(self, db: Database, *, allow_private_hosts: bool = False):
         self.db = db
+        self.allow_private_hosts = allow_private_hosts
+
+    def _validated_base_url(self, base_url: str) -> str:
+        try:
+            return validate_outbound_url(
+                base_url, allow_private=self.allow_private_hosts, require_https=True
+            )
+        except UnsafeUrl as exc:
+            # ValueError so existing 422 handling in the server still applies.
+            raise ValueError(str(exc)) from exc
 
     # ---------------- queries ----------------
 
@@ -88,9 +106,7 @@ class ProfileService:
         supports_mask: bool = False,
         price_per_image_usd: float | None = None,
     ) -> dict:
-        base_url = base_url.rstrip("/")
-        if not base_url.startswith("https://"):
-            raise ValueError("base_url must use https://")
+        base_url = self._validated_base_url(base_url)
         if reference_mode not in VALID_PROFILE_REFERENCE_MODES:
             raise ValueError(f"reference_mode must be one of {VALID_PROFILE_REFERENCE_MODES}")
         if kind not in ("image", "llm"):
@@ -118,9 +134,7 @@ class ProfileService:
         }
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if "base_url" in updates:
-            updates["base_url"] = str(updates["base_url"]).rstrip("/")
-            if not updates["base_url"].startswith("https://"):
-                raise ValueError("base_url must use https://")
+            updates["base_url"] = self._validated_base_url(str(updates["base_url"]))
         if "reference_mode" in updates and updates["reference_mode"] not in VALID_PROFILE_REFERENCE_MODES:
             raise ValueError(f"reference_mode must be one of {VALID_PROFILE_REFERENCE_MODES}")
         if "supports_mask" in updates:
@@ -185,7 +199,9 @@ class ProviderResolver:
 
     def __init__(self, config: Config, db: Database, fallback: ImageProvider):
         self.config = config
-        self.profiles = ProfileService(db)
+        self.profiles = ProfileService(
+            db, allow_private_hosts=config.allow_private_api_hosts
+        )
         self.fallback = fallback
         self._cache_key: tuple[str, str, str] | None = None
         self._cache_provider: ImageProvider | None = None
@@ -201,6 +217,12 @@ class ProviderResolver:
         # and could collide on a rapid create-then-update sequence).
         cache_key = (row["base_url"], row["api_key"], row["reference_mode"])
         if cache_key != self._cache_key or self._cache_provider is None:
+            # Re-validated on every profile change, not just on write: provider
+            # errors surface response text in task error_message, so this path is
+            # read-capable too.
+            assert_safe_request_url(
+                row["base_url"], allow_private=self.config.allow_private_api_hosts
+            )
             self._cache_provider = OpenAICompatProvider(
                 OpenAICompatSettings(
                     base_url=row["base_url"],

@@ -65,6 +65,23 @@ def save_cf_config(db: Database, fields: dict) -> None:
             )
 
 
+def clear_cf_config(db: Database) -> list[str]:
+    """Delete every stored Cloudflare credential; returns the keys removed.
+
+    `save_cf_config` intentionally treats a blank field as "keep the stored
+    value" so a partial update need not resend the token — which means saving
+    cannot revoke. Revocation needs its own explicit operation.
+    """
+    conn = db.conn()
+    cleared: list[str] = []
+    with transaction(conn):
+        for key in CF_KEYS:
+            cur = conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+            if cur.rowcount:
+                cleared.append(key)
+    return cleared
+
+
 def cf_config_public(db: Database) -> dict:
     conn = db.conn()
     out: dict = {}
