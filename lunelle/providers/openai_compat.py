@@ -22,11 +22,26 @@ from dataclasses import dataclass
 import httpx
 
 from ..logging_setup import redact
+from ..urlguard import UnsafeUrl, guard_request_url
 from .base import GenerationRequest, GenerationResult, ImageProvider, ProviderError
 
 logger = logging.getLogger(__name__)
 
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _guard(url: str, *, stage: str) -> None:
+    """Validate an outbound URL, as a classified ProviderError on refusal.
+
+    Non-retryable: a URL pointing at internal space will point there next time
+    too, and retrying a blocked request only repeats the attempt.
+    """
+    try:
+        guard_request_url(url)
+    except UnsafeUrl as exc:
+        raise ProviderError(
+            "unsafe_url", f"refusing unsafe {stage} url: {exc}", retryable=False
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -136,9 +151,18 @@ class OpenAICompatProvider(ImageProvider):
         return {"Authorization": f"Bearer {self.settings.api_key}"}
 
     def _post(self, url: str, *, json_body=None, files=None, data=None) -> httpx.Response:
+        # Re-validated per request, not just when this provider was built: the
+        # base URL comes from an operator-editable profile and DNS can change
+        # between the two.
+        _guard(url, stage="request")
         try:
             with httpx.Client(timeout=self.settings.timeout_s) as client:
-                return client.post(url, headers=self._headers(), json=json_body, files=files, data=data)
+                return client.post(
+                    url, headers=self._headers(), json=json_body, files=files, data=data,
+                    # A 302 to an internal address would bypass the check above:
+                    # only the first URL is ours to validate.
+                    follow_redirects=False,
+                )
         except Exception as exc:  # noqa: BLE001 - classified below
             raise _classify_transport(exc) from exc
 
@@ -237,8 +261,15 @@ class OpenAICompatProvider(ImageProvider):
         )
 
     def _download(self, url: str) -> bytes:
-        if not url.startswith("https://"):
-            raise ProviderError("download_failed", "refusing non-https image url", retryable=False)
+        """Fetch a provider-supplied image URL.
+
+        The URL comes from the provider's response body, so it is fully untrusted:
+        a compromised or hostile endpoint returning
+        `https://169.254.169.254/latest/meta-data` would have the server fetch it
+        and store the result as an image. An `https://` prefix check alone (what
+        this used to do) does not stop that.
+        """
+        _guard(url, stage="download")
         try:
             # No redirects: image URLs are direct object-storage links; redirects widen SSRF surface.
             with httpx.Client(timeout=self.settings.timeout_s, follow_redirects=False) as client:

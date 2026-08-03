@@ -170,10 +170,14 @@ class MatrixRequest(BaseModel):
     views: list[str] = Field(default_factory=list)
     force: bool = False
     note: str = Field(default="", max_length=200)
-    confirm_estimated_usd: float | None = Field(
+    confirm_max_usd: float | None = Field(
         default=None, ge=0, le=100000,
-        description="Echo back estimated_usd from /matrix/estimate to authorize a "
-                    "batch above LUNELLE_CONFIRM_COST_USD. 409 if absent or stale.",
+        description="Echo back confirm_max_usd (the WORST-case ceiling) from "
+                    "/matrix/estimate to authorize a batch whose ceiling is at or "
+                    "above LUNELLE_CONFIRM_COST_USD. 409 if absent or stale. "
+                    "Replaces confirm_estimated_usd, which asked callers to "
+                    "authorize the expected cost while exposing them to the "
+                    "worst case.",
     )
 
 

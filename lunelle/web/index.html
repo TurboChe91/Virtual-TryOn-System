@@ -554,19 +554,21 @@ async function generateMatrix(styleId){
       `已排队 $${b.committed_usd.toFixed(4)}、剩余 $${b.remaining_usd.toFixed(4)}` +
       `（上限 $${b.limit_usd.toFixed(2)}）`
     : '\n\n未设置预算上限（LUNELLE_DAILY_BUDGET_USD=0）';
+  // 授权的是**上限**而不是预计值：批准 $0.64 却可能被扣 $3.84 不叫知情同意。
   const lines =
     `确认生成试戴矩阵？\n\n` +
     `本次出图：${est.image_count} 张（请求 ${est.cells_requested} 格，` +
     `已有成品 ${est.cells_already_succeeded} 格，进行中 ${est.cells_in_progress} 格）\n` +
     `预计费用：$${est.estimated_usd.toFixed(4)}\n` +
-    `最坏情况：$${est.worst_case_usd.toFixed(4)}（${est.worst_case_note}）` +
+    `最高费用（本次授权额度）：$${est.confirm_max_usd.toFixed(4)}\n` +
+    `　上限含义：${est.worst_case_note}` +
     budgetLine;
   if (!confirm(lines)) return;
 
   try {
     const gen = await api(`/api/styles/${styleId}/matrix`, {method:'POST',
-      // 回传报价金额作为授权：报价若已变动，服务端会拒绝并要求重新确认。
-      body: JSON.stringify({confirm_estimated_usd: est.estimated_usd})});
+      // 回传上限金额作为授权：上限若已变动，服务端会拒绝并要求重新确认。
+      body: JSON.stringify({confirm_max_usd: est.confirm_max_usd})});
     toast(`试戴矩阵已排队 ${gen.created.length} 格` +
       (gen.skipped.length ? `，${gen.skipped.length} 格已有成品` : ''));
     loadTasks(); loadMetrics(); loadBudget();

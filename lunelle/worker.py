@@ -17,7 +17,16 @@ import threading
 import time
 from pathlib import Path
 
-from .budget import BudgetExceeded, check_can_spend
+from .budget import (
+    BudgetExceeded,
+    LineageBudgetExceeded,
+    claim_lineage_descendant,
+    recover_orphan_reservations,
+    release_spend,
+    reserve_spend,
+    settle_spend,
+    sync_lineage_spend,
+)
 from .config import Config
 from .db import Database
 from .logging_setup import task_logger
@@ -62,6 +71,10 @@ class Worker:
         if self._threads:
             return
         self.service.recover_interrupted()
+        # A crash between reserving and settling would otherwise leave budget
+        # claimed forever.
+        recover_orphan_reservations(self.db)
+        self.recover_interrupted_qa()
         for index in range(self.config.max_concurrency):
             thread = threading.Thread(target=self._loop, name=f"lunelle-worker-{index}", daemon=True)
             thread.start()
@@ -162,24 +175,6 @@ class Worker:
                 detail_path = Path(detail)
                 if detail_path.is_file():
                     references.append(detail_path)
-        # Budget breaker, re-checked here rather than only at queue time: a batch
-        # authorized an hour ago must not be able to spend money the budget no
-        # longer allows. Checked before the provider call, so tripping costs zero.
-        try:
-            check_can_spend(
-                self.db, self.config,
-                task_cost_usd=float(task.get("estimated_cost_usd") or 0.0),
-            )
-        except BudgetExceeded as exc:
-            log.warning("budget breaker refused this task",
-                        ctx={"stage": "budget", "error_code": ERROR_BUDGET_EXCEEDED,
-                             "status": f"remaining={exc.snapshot.remaining_usd}"})
-            self.service.complete_failure(
-                task["task_id"], error_code=ERROR_BUDGET_EXCEEDED,
-                error_message=str(exc), retryable=False,
-            )
-            return
-
         prompt = task["prompt"]
         expected_reference = (
             task["metadata"].get("use_reference")
@@ -214,11 +209,43 @@ class Worker:
         )
         log.info("attempt started", ctx={"stage": "generate", "attempt": attempt_no})
 
+        # Claim the spend atomically BEFORE the paid call. A read-then-spend check
+        # let two worker threads both see "under budget" and both spend; the
+        # reservation is inserted in the same transaction as the check, so
+        # concurrent workers serialize and the cap holds at any concurrency.
+        estimated = float(task.get("estimated_cost_usd") or 0.0)
+        root_task_id = task.get("root_task_id") or task["task_id"]
+        try:
+            reserve_spend(
+                self.db, self.config, task_id=task["task_id"], attempt_no=attempt_no,
+                estimated_usd=estimated, root_task_id=root_task_id,
+            )
+        except BudgetExceeded as exc:
+            log.warning("budget breaker refused this task",
+                        ctx={"stage": "budget", "error_code": ERROR_BUDGET_EXCEEDED,
+                             "status": f"remaining={exc.snapshot.remaining_usd}"})
+            self.service.finish_attempt(
+                task["task_id"], attempt_no, outcome="error", duration_ms=0,
+                error_code=ERROR_BUDGET_EXCEEDED, error_message=str(exc),
+                reference_used=bool(references),
+            )
+            self.service.complete_failure(
+                task["task_id"], error_code=ERROR_BUDGET_EXCEEDED,
+                error_message=str(exc), retryable=False,
+            )
+            return
+
         started = time.monotonic()
         try:
             result = provider.generate(request)
         except ProviderError as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
+            # Release rather than settle: no charge is known. A provider that
+            # billed before erroring is under-counted, which is the lesser evil —
+            # holding the reservation would let a run of transient failures
+            # permanently consume the day's budget.
+            release_spend(self.db, task_id=task["task_id"], attempt_no=attempt_no)
+            sync_lineage_spend(self.db, root_task_id)
             self.service.finish_attempt(
                 task["task_id"], attempt_no, outcome="error", duration_ms=duration_ms,
                 http_status=exc.http_status, error_code=exc.code, error_message=exc.message,
@@ -237,6 +264,12 @@ class Worker:
 
         duration_ms = int((time.monotonic() - started) * 1000)
 
+        # The provider call returned, so the money is spent. Settle before doing
+        # anything that can fail, so a later error cannot lose the accounting.
+        settle_spend(self.db, task_id=task["task_id"], attempt_no=attempt_no,
+                     actual_usd=result.actual_cost_usd)
+        sync_lineage_spend(self.db, root_task_id)
+
         # Persist the image before declaring success.
         output_path = self.service.output_file_for(task, attempt_no)
         try:
@@ -247,6 +280,8 @@ class Worker:
                 task["task_id"], attempt_no, outcome="error", duration_ms=duration_ms,
                 external_request_id=result.external_request_id,
                 error_code=code, error_message=str(exc), reference_used=result.reference_used,
+                # Charged even though the write failed; keep it in the accounting.
+                cost_usd=result.actual_cost_usd,
             )
             self.service.complete_failure(
                 task["task_id"], error_code=code,
@@ -316,6 +351,68 @@ class Worker:
             except Exception:  # noqa: BLE001 - never let bookkeeping kill the loop
                 logger.exception("could not record qa_state=error")
 
+    def recover_interrupted_qa(self) -> dict:
+        """Finish QA for tasks that succeeded but whose QA never completed.
+
+        A crash between `complete_success` and `finish_qa` leaves a task at
+        qa_state pending/running. The publish/export gate refuses those (correct —
+        no verdict exists), but they would sit there forever with no way forward.
+
+        Re-running QA here is safe and free: it is purely local image analysis, no
+        provider call. If the output file is gone the asset cannot be judged at
+        all, so qa_state becomes `error` and the gate keeps refusing it until an
+        operator regenerates.
+        """
+        rows = self.db.conn().execute(
+            "SELECT task_id, output_type, style_id, output_path FROM tasks"
+            " WHERE status = 'success' AND qa_state IN ('pending', 'running')"
+        ).fetchall()
+        summary = {"examined": len(rows), "requeued": 0, "missing_output": 0, "failed": 0}
+        for row in rows:
+            task_id = row["task_id"]
+            output_path = Path(row["output_path"] or "")
+            if not row["output_path"] or not output_path.is_file():
+                self.service.set_qa_state(task_id, QA_ERROR)
+                summary["missing_output"] += 1
+                logger.warning(
+                    "qa recovery: output missing for %s; marked qa_state=error", task_id
+                )
+                continue
+            try:
+                task = self.service.get_task(task_id, with_details=False)
+                size = self._size_for(task["output_type"])
+                grid_path = None
+                if task["output_type"] == OUTPUT_WEARING:
+                    grid_task = self.service.latest_successful_grid(task["style_id"])
+                    if grid_task and grid_task.get("output_path"):
+                        candidate = Path(grid_task["output_path"])
+                        if candidate.is_file():
+                            grid_path = candidate
+                qa_type = (OUTPUT_WEARING if task["output_type"] == OUTPUT_MATRIX_CELL
+                           else task["output_type"])
+                qa_doc = run_qa(
+                    output_type=qa_type,
+                    image_path=output_path,
+                    expected_size=size,
+                    min_side=min(self.config.qa_min_side, min(size)),
+                    grid_image_path=grid_path,
+                )
+                self.service.finish_qa(task_id, qa_doc)
+                summary["requeued"] += 1
+                logger.info(
+                    "qa recovery: re-ran QA for %s (passed=%s)", task_id, qa_doc["passed"]
+                )
+            except Exception:  # noqa: BLE001 - recovery must not block startup
+                summary["failed"] += 1
+                logger.exception("qa recovery failed for %s", task_id)
+                try:
+                    self.service.set_qa_state(task_id, QA_ERROR)
+                except Exception:  # noqa: BLE001
+                    logger.exception("could not mark qa_state=error for %s", task_id)
+        if summary["examined"]:
+            logger.warning("qa recovery summary: %s", summary)
+        return summary
+
     def _maybe_llm_qa(self, task: dict, output_path: Path, log) -> None:
         """Advisory vision-LLM check: verifies per-nail identity and, on failure,
         writes the correction and queues the next version itself (bounded by
@@ -359,39 +456,71 @@ class Worker:
                  ctx={"stage": "qa", "status": "pass" if verdict["passed"] else "fail"})
         if verdict["passed"]:
             return
-        depth = int(task["metadata"].get("auto_correct_depth", 0))
-        if depth >= self.config.auto_regen_max or not verdict["correction"]:
+        if not verdict["correction"]:
             return
-        try:
-            new_task = self.service.create_correction(
-                task["task_id"], correction_text=verdict["correction"])
-            self.service.stamp_metadata(new_task["task_id"],
-                                        {"auto_correct_depth": depth + 1,
-                                         "auto_corrected_from": task["task_id"]})
-            log.info("auto-correction queued by llm qa",
-                     ctx={"stage": "qa", "status": f"depth={depth + 1}"})
-        except Exception:  # noqa: BLE001 - budget/conflict ends the loop quietly
-            logger.exception("auto-correction scheduling failed")
+        self._queue_automatic_work(task, log, kind="correction",
+                                   correction_text=verdict["correction"])
 
     def _maybe_auto_regen(self, task: dict, qa_doc: dict, log) -> None:
-        """First-shot-or-reroll policy: a hard automatic-QA failure earns one
-        fresh regeneration (bounded by LUNELLE_AUTO_REGEN_MAX, 0 disables)."""
-        depth = int(task["metadata"].get("auto_regen_depth", 0))
-        if depth >= self.config.auto_regen_max:
+        """First-shot-or-reroll policy: a hard automatic-QA failure earns a fresh
+        regeneration, bounded by the shared per-root lineage budget."""
+        self._queue_automatic_work(task, log, kind="regeneration")
+
+    def _queue_automatic_work(self, task: dict, log, *, kind: str,
+                              correction_text: str = "") -> None:
+        """Queue one automatic re-generation or correction against the SHARED
+        per-root budget.
+
+        Both automatic paths funnel through here so they draw down ONE allowance.
+        Previously each kept its own depth counter in task metadata and neither
+        copied the other's to the child it created, so a task could alternate
+        regen -> correct -> regen indefinitely, each hop resetting the counter the
+        other path checked. The advertised worst-case cost was therefore not a
+        bound. The lineage ledger is now that bound.
+        """
+        if not self.config.automatic_work_enabled:
+            return
+        root_task_id = task.get("root_task_id") or task["task_id"]
+        estimated = float(task.get("estimated_cost_usd") or 0.0)
+        try:
+            claim = claim_lineage_descendant(
+                self.db, root_task_id=root_task_id,
+                estimated_usd=estimated, kind=kind,
+            )
+        except LineageBudgetExceeded as exc:
+            # Expected end of the loop, not an error: log the reason and stop.
+            log.info("automatic work refused by the lineage budget",
+                     ctx={"stage": "qa", "status": f"{kind}:budget_exhausted"})
+            logger.info("lineage budget stop: %s", exc)
             return
         try:
-            plan = self.service.create_generation(
-                task["style_id"], [task["output_type"]], force=True,
-                note=f"auto-regen after QA fail of {task['task_id']}",
+            if kind == "correction":
+                new_task = self.service.create_correction(
+                    task["task_id"], correction_text=correction_text)
+                queued = [new_task["task_id"]]
+            else:
+                plan = self.service.create_generation(
+                    task["style_id"], [task["output_type"]], force=True,
+                    note=f"auto-regen after QA fail of {task['task_id']}",
+                    root_override=root_task_id,
+                )
+                queued = [created["task_id"] for created in plan.created]
+            for task_id in queued:
+                self.service.stamp_metadata(task_id, {
+                    f"auto_{kind}_of": task["task_id"],
+                    "lineage_descendant_no": claim["descendant_count"],
+                })
+            log.info(
+                f"automatic {kind} queued",
+                ctx={"stage": "qa",
+                     "status": f"lineage {claim['descendant_count']}/"
+                               f"{claim['max_descendants']}"},
             )
-            for created in plan.created:
-                self.service.stamp_metadata(created["task_id"],
-                                            {"auto_regen_depth": depth + 1,
-                                             "auto_regen_of": task["task_id"]})
-            log.info("auto-regen queued after QA failure",
-                     ctx={"stage": "qa", "status": f"depth={depth + 1}"})
-        except Exception:  # noqa: BLE001 - auto-regen is best-effort
-            logger.exception("auto-regen scheduling failed")
+        except Exception:  # noqa: BLE001 - scheduling is best-effort
+            # The slot stays consumed. Releasing it on failure would let a
+            # repeatedly-failing scheduler retry without bound, which is the very
+            # thing this budget exists to prevent.
+            logger.exception("automatic %s scheduling failed after claiming a slot", kind)
 
     def _size_for(self, output_type: str) -> tuple[int, int]:
         if output_type == OUTPUT_GRID:

@@ -146,6 +146,10 @@ NON_RETRYABLE_ERROR_CODES = frozenset(
         "disk_full",
         "config_error",
         "unsupported",
+        # An outbound URL was refused by the SSRF guard (see lunelle/urlguard.py).
+        # It will point at the same internal address next time, so retrying only
+        # repeats a blocked request.
+        "unsafe_url",
         # A required input asset is absent (e.g. no hand model for a matrix
         # cell's tone+view). Retrying cannot help until an operator uploads it,
         # so this fails fast BEFORE spending money on a degraded render.

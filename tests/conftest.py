@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import faulthandler
+import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -11,6 +14,76 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lunelle.config import DEFAULT_PRICING_USD, Config  # noqa: E402
 from lunelle.db import Database, migrate  # noqa: E402
 from lunelle.tasks import TaskService  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Session guards: hard timeout and worker-thread leak detection
+# ---------------------------------------------------------------------------
+
+#: Wall-clock ceiling for the whole session. The suite runs in ~70s locally, so
+#: 900s means only a genuine hang trips it. A hang must fail loudly with a
+#: traceback rather than sit until CI's own timeout kills it with no diagnosis —
+#: this codebase runs worker threads and HTTP clients, both of which can block
+#: forever on a bad wait.
+SESSION_TIMEOUT_S = int(os.environ.get("LUNELLE_TEST_TIMEOUT_S", "900"))
+
+#: Threads the worker creates, by name prefix (see Worker.start).
+WORKER_THREAD_PREFIX = "lunelle-worker-"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Arm the hard timeout. faulthandler dumps every thread's stack and aborts,
+    so a hang is diagnosable from CI logs alone."""
+    if SESSION_TIMEOUT_S > 0:
+        faulthandler.enable()
+        faulthandler.dump_traceback_later(SESSION_TIMEOUT_S, exit=True)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    faulthandler.cancel_dump_traceback_later()
+
+
+def _worker_threads() -> list[threading.Thread]:
+    return [
+        thread for thread in threading.enumerate()
+        if thread.name.startswith(WORKER_THREAD_PREFIX) and thread.is_alive()
+    ]
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_worker_threads():
+    """Fail a test that leaves a worker thread running.
+
+    Leaked workers keep claiming tasks and writing to a database another test
+    owns, which shows up later as an unrelated flaky failure. Catching it in the
+    test that caused it is the difference between a one-line fix and an afternoon.
+    Daemon threads would otherwise let the whole suite pass with workers still
+    running.
+    """
+    before = {thread.ident for thread in _worker_threads()}
+    yield
+    # Threads exit asynchronously after stop(); allow a brief grace period.
+    deadline = time.time() + 5.0
+    leaked: list[threading.Thread] = []
+    while time.time() < deadline:
+        leaked = [t for t in _worker_threads() if t.ident not in before]
+        if not leaked:
+            break
+        time.sleep(0.05)
+    assert not leaked, (
+        f"{len(leaked)} worker thread(s) still running after the test: "
+        f"{[t.name for t in leaked]} — call worker.stop() (or use the client "
+        f"fixture, which stops it in lifespan shutdown)"
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _session_thread_audit():
+    """Report any worker thread surviving the whole session."""
+    yield
+    leaked = _worker_threads()
+    assert not leaked, (
+        f"worker threads survived the test session: {[t.name for t in leaked]}"
+    )
 
 
 def make_config(tmp_path: Path, **overrides) -> Config:
@@ -51,6 +124,7 @@ def make_config(tmp_path: Path, **overrides) -> Config:
         # budget/confirmation tests set them explicitly.
         daily_budget_usd=0.0,
         confirm_cost_usd=0.0,
+        max_lineage_descendants=2,
         allow_private_api_hosts=False,
         pricing_usd=dict(DEFAULT_PRICING_USD),
     )

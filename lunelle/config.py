@@ -116,8 +116,11 @@ class Config:
     # ---- cost controls ----
     #: Rolling-24h spend cap in USD. 0 disables the breaker.
     daily_budget_usd: float
-    #: Batches estimated at or above this must be confirmed by the caller. 0 = always allow.
+    #: Batches whose WORST case reaches this must be confirmed by the caller. 0 = always allow.
     confirm_cost_usd: float
+    #: Total automatic descendants (re-generations + corrections combined) per root
+    #: task. One shared allowance: the two paths can no longer reset each other.
+    max_lineage_descendants: int
 
     # ---- outbound request safety ----
     #: Permit API hosts on private/loopback ranges (self-hosted models). Refused in production.
@@ -130,6 +133,17 @@ class Config:
     @property
     def is_production(self) -> bool:
         return self.env == "production"
+
+    @property
+    def automatic_work_enabled(self) -> bool:
+        """Whether the system may queue work on its own (regen / correction).
+
+        LUNELLE_AUTO_REGEN_MAX keeps its documented meaning as the kill switch
+        (0 disables automatic work entirely). How MUCH automatic work is allowed is
+        no longer read from it — that is the shared per-root lineage budget,
+        because two independent per-path counters could reset each other.
+        """
+        return self.auto_regen_max > 0
 
     def key_fingerprint(self) -> str:
         """Short non-reversible identifier of the API key, safe for logs."""
@@ -276,9 +290,13 @@ def load_config(dotenv_path: str | os.PathLike | None = None) -> Config:
         # matrices — generous for real work, but a bounded loss if something runs
         # away. 0 disables the breaker entirely.
         daily_budget_usd=_env_float("LUNELLE_DAILY_BUDGET_USD", 20.0, 0.0, 100000.0),
-        # A full 16-cell matrix is ~0.64 USD at seedream prices, so 0.50 puts the
-        # confirmation prompt in front of exactly the actions worth confirming.
-        confirm_cost_usd=_env_float("LUNELLE_CONFIRM_COST_USD", 0.50, 0.0, 100000.0),
+        # Confirmation is gated on the WORST case, and a full 16-cell matrix's
+        # ceiling is ~3.84 USD at seedream prices with default retries/lineage.
+        # 1.00 puts the prompt in front of a whole matrix but not a single image.
+        confirm_cost_usd=_env_float("LUNELLE_CONFIRM_COST_USD", 1.00, 0.0, 100000.0),
+        # Shared allowance for automatic re-generations AND corrections per root.
+        # 2 permits the proven "first shot, then up to two corrections" SOP loop.
+        max_lineage_descendants=_env_int("LUNELLE_MAX_LINEAGE_DESCENDANTS", 2, 0, 10),
         allow_private_api_hosts=_env("LUNELLE_ALLOW_PRIVATE_API_HOSTS", "0") == "1",
         pricing_usd=pricing,
     )

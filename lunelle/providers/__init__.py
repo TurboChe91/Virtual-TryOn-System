@@ -9,6 +9,7 @@ import httpx
 
 from ..config import Config
 from ..logging_setup import redact
+from ..urlguard import guard_request_url
 from .base import GenerationRequest, GenerationResult, ImageProvider, ProviderError
 from .mock import MockImageProvider
 from .openai_compat import OpenAICompatProvider, OpenAICompatSettings
@@ -45,6 +46,11 @@ def build_chat_fn(config: Config):
         return None
 
     def chat_fn(system: str, user: str) -> str:
+        # Same guard as every other outbound path: this URL is env-configured
+        # rather than operator-editable, but routing it through one safe layer is
+        # what stops a future call site from quietly skipping the check.
+        url = f"{config.text_api_base_url}/chat/completions"
+        guard_request_url(url)
         body = {
             "model": config.text_model,
             "messages": [
@@ -57,9 +63,10 @@ def build_chat_fn(config: Config):
         try:
             with httpx.Client(timeout=60) as client:
                 response = client.post(
-                    f"{config.text_api_base_url}/chat/completions",
+                    url,
                     headers={"Authorization": f"Bearer {config.text_api_key}"},
                     json=body,
+                    follow_redirects=False,
                 )
         except httpx.HTTPError as exc:
             raise RuntimeError(f"text model request failed: {redact(str(exc))}") from exc

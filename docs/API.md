@@ -69,19 +69,42 @@ Base URL: `http://<host>:8300`。写操作在设置 `LUNELLE_ADMIN_TOKEN` 后需
 自动返修的最坏情况）、`cells_already_succeeded`、`cells_in_progress`、
 `requires_confirmation`、`budget`。
 
-`POST /api/styles/{style_id}/matrix` — 估算金额 ≥ `LUNELLE_CONFIRM_COST_USD` 时必须带
-`confirm_estimated_usd`，且必须与当前估算一致：
+`POST /api/styles/{style_id}/matrix` — **worst_case_usd** ≥ `LUNELLE_CONFIRM_COST_USD`
+时必须带 `confirm_max_usd`，且必须等于当前的 `confirm_max_usd`：
 
 - 409 `cost_confirmation_required` — 未确认；响应含 `estimate` 供前端展示
-- 409 `cost_confirmation_mismatch` — 确认金额与当前报价不符（预览后价格变了）
+- 409 `cost_confirmation_mismatch` — 授权上限与当前上限不符（预览后价格变了）
 - 429 `budget_exceeded` — 会超出滚动 24h 预算；响应含 `budget` 快照。**整批拒绝，
   不会部分排队**
 
-`GET /api/budget` — 滚动窗口开销快照（`realized_usd` 已实现、`committed_usd` 在途、
-`remaining_usd`、`limit_usd`、`enabled`）。需要管理员：开销数字反映业务量。
+授权的是**上限**而不是预计值。批准 $0.64 却可能被扣 $3.84 不叫知情同意，因此
+`requires_confirmation` 与 `confirm_max_usd` 都以最坏情况为准。
+（旧字段 `confirm_estimated_usd` 已移除；schema 为 `extra="forbid"`，旧客户端会收到 422
+而不是静默按错误语义放行。）
 
-预算熔断在 worker 调用 provider **之前**再检查一次，因此触发的代价是 0 次付费调用，
-任务以非重试的 `budget_exceeded` 失败，窗口滚动或上调上限后可手动重试。
+`GET /api/budget` — 滚动窗口开销快照：`realized_usd`（已结算）、`reserved_usd`（在途
+付费调用）、`committed_usd`（已排队未开始）、`spent_usd`、`total_usd`、`remaining_usd`、
+`limit_usd`、`enabled`。需要管理员：开销数字反映业务量。
+
+`GET /api/tasks/{task_id}/lineage` — 该任务所属 lineage 的**共享**自动工作预算：
+`descendant_count` / `max_descendants` / `lineage_spent_usd` / `lineage_max_usd` /
+`exhausted`。自动重生与自动修正共用这一份额度，所以这里是判断「系统是预算用完了才停，
+还是坏了」的地方。
+
+### 预算如何真正生效
+
+三个位置，缺一不可：
+
+1. **队列授权**在写事务内检查（`BEGIN IMMEDIATE` 序列化写者），因此并发提交不会
+   check-then-insert 双双通过。
+2. **调用前预占**（`spend_reservations`）：检查与预占在同一事务内完成，多 Worker 会
+   序列化。纯粹的「先读后花」做不到这点——两个线程可以都读到「未超预算」然后都花钱。
+3. **结算**：成功按实际费用（供应商不回报时按预占估算，因为钱确实花了）；失败释放，
+   或在已知扣费时按该金额结算。崩溃遗留的预占在启动时按估算结算（假定已扣费，方向
+   偏保守）。
+
+熔断触发的代价是 **0 次付费调用**：任务以非重试的 `budget_exceeded` 失败，窗口滚动或
+上调上限后可手动重试。
 
 ## 批次 / 统计 / 导出
 

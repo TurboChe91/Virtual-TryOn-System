@@ -153,3 +153,36 @@ def assert_safe_request_url(
 ) -> None:
     """Re-check immediately before an outbound request (rebinding window)."""
     validate_outbound_url(url, allow_private=allow_private, require_https=require_https)
+
+
+#: Process-wide setting for code too deep to thread config through (the provider
+#: adapters). Set once at startup from Config; defaults to the safe value, so a
+#: caller that forgets to configure it gets blocking, not bypassing.
+_allow_private_hosts = False
+
+
+def configure_allow_private_hosts(allow: bool) -> None:
+    """Set the process-wide private-host policy (from Config at startup)."""
+    global _allow_private_hosts  # noqa: PLW0603 - deliberate process-wide policy
+    _allow_private_hosts = bool(allow)
+    if allow:
+        logger.warning(
+            "private/loopback API hosts are ALLOWED for outbound requests "
+            "(LUNELLE_ALLOW_PRIVATE_API_HOSTS=1); refused in production"
+        )
+
+
+def allow_private_hosts() -> bool:
+    return _allow_private_hosts
+
+
+def guard_request_url(url: str, *, require_https: bool = True) -> str:
+    """Validate any URL about to be requested, using the process-wide policy.
+
+    This is the choke point every outbound HTTP call goes through, so a new
+    request path cannot silently skip the check: the URL a provider hands back is
+    just as untrusted as one an operator typed.
+    """
+    return validate_outbound_url(
+        url, allow_private=_allow_private_hosts, require_https=require_https
+    )

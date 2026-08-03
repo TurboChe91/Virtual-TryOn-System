@@ -71,8 +71,13 @@ def _migration_files() -> list[tuple[int, str, str]]:
     return out
 
 
-def migrate(conn: sqlite3.Connection) -> list[str]:
-    """Apply pending migrations; returns names applied. Safe to call repeatedly."""
+def migrate(conn: sqlite3.Connection, *, target: int | None = None) -> list[str]:
+    """Apply pending migrations; returns names applied. Safe to call repeatedly.
+
+    `target` stops after that version, which lets scripts/check_migrations.py
+    walk the upgrade one step at a time with data present at each — the failure
+    mode a from-scratch test database can never reproduce.
+    """
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations ("
         " number INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
@@ -82,6 +87,8 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     for number, name, sql in _migration_files():
         if number in applied:
             continue
+        if target is not None and number > target:
+            break
         # Table rebuilds (CHECK/column changes) need the SQLite documented
         # procedure: disable FK enforcement OUTSIDE the transaction, rebuild,
         # then prove integrity with foreign_key_check before committing.

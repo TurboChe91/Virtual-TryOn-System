@@ -63,8 +63,10 @@ logger = logging.getLogger(__name__)
 
 
 from .budget import (  # noqa: E402
-    check_can_queue,
+    check_can_queue_locked,
     estimate_plan,
+    lineage_status,
+    open_lineage_locked,
     spend_snapshot,
 )
 from .errors import (  # noqa: E402  (re-exported for callers)
@@ -226,8 +228,16 @@ class TaskService:
         return hashlib.sha256(raw.encode()).hexdigest()
 
     def create_generation(
-        self, style_id: str, output_types: list[str], *, force: bool = False, note: str = ""
+        self, style_id: str, output_types: list[str], *, force: bool = False,
+        note: str = "", root_override: str | None = None,
     ) -> GenerationPlan:
+        """Queue operator-requested generations.
+
+        `root_override` attaches the new tasks to an existing lineage instead of
+        opening a new one — used by automatic re-generation, so a re-roll spends
+        the original root's shared allowance rather than granting itself a fresh
+        one (which is how the old per-path counters could alternate forever).
+        """
         style = self.get_style(style_id)
         bundle = self.prompt_bundle_for(style)
         for output_type in output_types:
@@ -305,12 +315,15 @@ class TaskService:
                 ):
                     metadata["use_style_reference"] = True
                     metadata["style_reference_path"] = style["reference_image_path"]
+                # An operator-requested task is its own lineage root, and gets a
+                # fresh shared allowance for whatever automatic work follows.
+                root_task_id = root_override or task_id
                 conn.execute(
                     "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
                     " negative_prompt, prompt_version, provider, model, status, retry_count,"
                     " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
-                    " created_at, updated_at, metadata_json)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " created_at, updated_at, root_task_id, metadata_json)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         task_id,
                         batch_id,
@@ -330,10 +343,17 @@ class TaskService:
                         wait_for,
                         now,
                         now,
+                        root_task_id,
                         json.dumps(metadata, ensure_ascii=False),
                     ),
                 )
-                created.append({"task_id": task_id, "status": PENDING, "output_type": output_type})
+                if root_override is None:
+                    open_lineage_locked(
+                        conn, self.config, root_task_id=task_id, style_id=style_id,
+                        output_type=output_type, price_per_image=price,
+                    )
+                created.append({"task_id": task_id, "status": PENDING,
+                                "output_type": output_type, "root_task_id": root_task_id})
                 if output_type == OUTPUT_GRID:
                     grid_task_id_this_round = task_id
 
@@ -409,14 +429,15 @@ class TaskService:
     def create_matrix_generation(
         self, style_id: str, *, tones: list[str] | None = None,
         views: list[str] | None = None, force: bool = False, note: str = "",
-        confirmed_usd: float | None = None,
+        confirmed_max_usd: float | None = None,
     ) -> GenerationPlan:
         """Queue the try-on matrix for one style: every tone x view cell.
 
-        `confirmed_usd` is the figure the caller was shown by `estimate_matrix`.
-        Above LUNELLE_CONFIRM_COST_USD it must be supplied and must still match,
-        so a single click can never commit an unbounded spend, and a price change
-        between preview and submit re-prompts instead of silently charging more.
+        `confirmed_max_usd` is the worst-case ceiling the caller was shown by
+        `estimate_matrix`. Above LUNELLE_CONFIRM_COST_USD it must be supplied and
+        must still match, so a single click can never commit an unbounded spend,
+        and a price change between preview and submit re-prompts instead of
+        silently charging more.
         """
         from .models import OUTPUT_MATRIX_CELL
 
@@ -427,11 +448,7 @@ class TaskService:
         use_refs = self.config.reference_mode != "off"
 
         estimate = self.estimate_matrix(style_id, tones=tones, views=views, force=force)
-        self._require_cost_authorization(estimate, confirmed_usd)
-        # Breaker at queue time: counts realized spend plus everything already
-        # queued, so many batches cannot collectively overrun the cap.
-        check_can_queue(self.db, self.config,
-                        additional_usd=estimate["estimated_usd"])
+        self._require_cost_authorization(estimate, confirmed_max_usd)
 
         conn = self.db.conn()
         batch_id = new_batch_id()
@@ -440,6 +457,12 @@ class TaskService:
         reused: list[dict] = []
         skipped: list[dict] = []
         with transaction(conn):
+            # Breaker INSIDE the write transaction: BEGIN IMMEDIATE serializes
+            # writers, so two concurrent callers cannot both pass the check and
+            # then both insert. Checking before the transaction was a
+            # check-then-act race that could overrun the cap.
+            check_can_queue_locked(conn, self.config,
+                                   additional_usd=estimate["estimated_usd"])
             conn.execute(
                 "INSERT INTO batches (batch_id, note, created_at) VALUES (?,?,?)",
                 (batch_id, note or f"try-on matrix {len(tones)}x{len(views)}", now),
@@ -488,14 +511,20 @@ class TaskService:
                         "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
                         " negative_prompt, prompt_version, provider, model, status, retry_count,"
                         " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
-                        " created_at, updated_at, metadata_json)"
-                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        " created_at, updated_at, root_task_id, metadata_json)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             task_id, batch_id, style_id, style["sku"], OUTPUT_MATRIX_CELL,
                             prompt, "", MATRIX_PROMPT_VERSION, provider_name, model,
                             PENDING, 0, self.config.max_retries, price, key, None,
-                            now, now, json.dumps(metadata, ensure_ascii=False),
+                            now, now, task_id, json.dumps(metadata, ensure_ascii=False),
                         ),
+                    )
+                    # Each cell is its own root: cells are independent assets, so
+                    # one cell's corrections must not consume another's allowance.
+                    open_lineage_locked(
+                        conn, self.config, root_task_id=task_id, style_id=style_id,
+                        output_type=OUTPUT_MATRIX_CELL, price_per_image=price,
                     )
                     created.append({"task_id": task_id, "status": PENDING,
                                     "output_type": OUTPUT_MATRIX_CELL, **cell})
@@ -507,25 +536,30 @@ class TaskService:
         return GenerationPlan(batch_id=batch_id, created=created, reused=reused, skipped=skipped)
 
     def _require_cost_authorization(self, estimate: dict,
-                                    confirmed_usd: float | None) -> None:
-        """Enforce the confirmation contract for an expensive batch."""
+                                    confirmed_max_usd: float | None) -> None:
+        """Enforce the confirmation contract for an expensive batch.
+
+        The authorized figure is the WORST case (`confirm_max_usd`), not the
+        expected cost: approving $0.64 and being billed $3.84 is not consent.
+        """
         if not estimate["requires_confirmation"]:
             return
-        quoted = estimate["estimated_usd"]
-        if confirmed_usd is None:
+        ceiling = estimate["confirm_max_usd"]
+        if confirmed_max_usd is None:
             raise CostConfirmationRequired(
                 f"cost_confirmation_required: this batch generates "
-                f"{estimate['image_count']} image(s) at an estimated "
-                f"${quoted:.4f} (worst case ${estimate['worst_case_usd']:.4f}). "
-                f"Re-send with confirm_estimated_usd={quoted} to authorize.",
+                f"{estimate['image_count']} image(s), expected "
+                f"${estimate['estimated_usd']:.4f} and AT MOST ${ceiling:.4f} "
+                f"({estimate['worst_case_note']}). Re-send with "
+                f"confirm_max_usd={ceiling} to authorize that ceiling.",
                 estimate,
             )
         # Tolerance of one hundredth of a cent absorbs float noise only.
-        if abs(float(confirmed_usd) - quoted) > 0.0001:
+        if abs(float(confirmed_max_usd) - ceiling) > 0.0001:
             raise CostConfirmationRequired(
-                f"cost_confirmation_mismatch: you authorized "
-                f"${float(confirmed_usd):.4f} but the batch now costs "
-                f"${quoted:.4f}. Review the new estimate and confirm again.",
+                f"cost_confirmation_mismatch: you authorized a ceiling of "
+                f"${float(confirmed_max_usd):.4f} but this batch's ceiling is now "
+                f"${ceiling:.4f}. Review the new estimate and confirm again.",
                 estimate,
             )
 
@@ -577,6 +611,9 @@ class TaskService:
                     "use_hero_reference"):
             if source["metadata"].get(key):
                 metadata[key] = source["metadata"][key]
+        # A correction stays inside the source's lineage, so an automatic
+        # correction spends the shared allowance instead of starting a new one.
+        root_task_id = source.get("root_task_id") or source["task_id"]
         with transaction(conn):
             conn.execute(
                 "INSERT INTO batches (batch_id, note, created_at) VALUES (?,?,?)",
@@ -586,8 +623,8 @@ class TaskService:
                 "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
                 " negative_prompt, prompt_version, provider, model, status, retry_count,"
                 " max_retries, estimated_cost_usd, idempotency_key, wait_for_task_id,"
-                " created_at, updated_at, metadata_json)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " created_at, updated_at, root_task_id, metadata_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     new_id_, batch_id, source["style_id"], source["sku"],
                     source["output_type"], prompt, source["negative_prompt"],
@@ -595,8 +632,16 @@ class TaskService:
                     self.config.max_retries, price,
                     self.idempotency_key(source["style_id"], source["output_type"],
                                          source["prompt_version"], prompt, batch_id),
-                    None, now, now, json.dumps(metadata, ensure_ascii=False),
+                    None, now, now, root_task_id,
+                    json.dumps(metadata, ensure_ascii=False),
                 ),
+            )
+            # A manual correction of a task that predates the ledger needs a
+            # lineage to draw on; opening it here keeps old assets correctable.
+            open_lineage_locked(
+                conn, self.config, root_task_id=root_task_id,
+                style_id=source["style_id"], output_type=source["output_type"],
+                price_per_image=price,
             )
         logger.info(
             "correction planned",
@@ -606,6 +651,16 @@ class TaskService:
         return self.get_task(new_id_, with_details=False)
 
     # ---------------- task queries ----------------
+
+    def lineage_for(self, task_id: str) -> dict:
+        """Shared automatic-work budget for this task's lineage.
+
+        Exposed so an operator can see why automatic correction stopped: without
+        it, "the system stopped trying" looks identical to "the system is broken".
+        """
+        task = self.get_task(task_id, with_details=False)
+        root = task.get("root_task_id") or task_id
+        return lineage_status(self.db, root)
 
     def get_task(self, task_id: str, *, with_details: bool = True) -> dict:
         conn = self.db.conn()
@@ -675,7 +730,7 @@ class TaskService:
             f"SELECT task_id, batch_id, style_id, sku, output_type, prompt_version, provider,"  # noqa: S608
             f" model, status, retry_count, max_retries, estimated_cost_usd, actual_cost_usd,"
             f" created_at, started_at, completed_at, updated_at, output_path, error_code,"
-            f" qa_state, review_state, reviewed_at, metadata_json"
+            f" qa_state, review_state, reviewed_at, root_task_id, metadata_json"
             f" FROM tasks {where} ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",  # noqa: S608
             (*params, limit, offset),
         ).fetchall()

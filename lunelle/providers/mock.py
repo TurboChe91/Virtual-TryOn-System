@@ -102,7 +102,11 @@ class MockImageProvider(ImageProvider):
         return GenerationResult(
             image_bytes=buf.getvalue(),
             external_request_id=f"mock-{self._calls}",
-            actual_cost_usd=0.0,
+            # None, matching every real OpenAI-compatible image API: they do not
+            # report spend. Reporting 0.0 made settlement free the whole
+            # reservation, so the budget breaker looked far more permissive under
+            # test than in production.
+            actual_cost_usd=None,
             reference_used=bool(request.reference_images),
             response_meta={"provider": "mock", "deterministic_seed": seed},
         )

@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push makes an in-flight run redundant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Backstop only. tests/conftest.py arms its own faulthandler timeout so a
+    # hang produces per-thread stacks instead of an opaque cancellation.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what the Docker image runs, so it is the version that must be
+        # green. 3.14 is the local development interpreter; keeping both stops a
+        # version-specific break from being discovered only at deploy time.
+        python-version: ["3.12", "3.14"]
+
+    env:
+      # Never let CI reach a paid API, whatever a stray .env or default says.
+      LUNELLE_ENV: test
+      LUNELLE_IMAGE_PROVIDER: mock
+      LUNELLE_IMAGE_API_BASE_URL: https://example.invalid/v1
+      LUNELLE_IMAGE_API_KEY: sk-ci-not-a-real-key
+      LUNELLE_IMAGE_MODEL: mock-model
+      # Opt-in real-API e2e stays off; RUN_REAL_E2E is deliberately unset.
+      LUNELLE_TEST_TIMEOUT_S: "900"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: python -m ruff check .
+
+      - name: Type check (mypy)
+        run: python -m mypy lunelle
+
+      - name: Tests
+        # -p no:cacheprovider: a cache written by one matrix leg must not leak
+        # into another. Durations surface a test that starts to crawl.
+        run: python -m pytest -p no:cacheprovider --durations=10
+
+      - name: Assert no paid API calls were attempted
+        # The suite must be hermetic. A real host in the logs means a test
+        # escaped the mock provider.
+        run: |
+          if grep -rIl --include=*.log -e "ai.wisech.com" -e "api.openai.com" data/ 2>/dev/null; then
+            echo "::error::a test attempted a real provider call"
+            exit 1
+          fi
+          echo "no real provider hosts in logs"
+
+  migrations:
+    # A migration must apply to an existing database, not just a fresh one; the
+    # test suite only ever builds fresh ones.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      LUNELLE_ENV: test
+      LUNELLE_IMAGE_PROVIDER: mock
+      LUNELLE_IMAGE_API_BASE_URL: https://example.invalid/v1
+      LUNELLE_IMAGE_API_KEY: sk-ci-not-a-real-key
+      LUNELLE_IMAGE_MODEL: mock-model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Apply migrations twice (idempotency) and check integrity
+        run: python scripts/check_migrations.py
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build --no-cache -t lunelle-studio:ci .
+      - name: Start it and wait for readiness
+        run: |
+          docker run -d --name lunelle-ci \
+            -e LUNELLE_ENV=development \
+            -e LUNELLE_IMAGE_PROVIDER=mock \
+            -e LUNELLE_IMAGE_API_BASE_URL=https://example.invalid/v1 \
+            -e LUNELLE_IMAGE_API_KEY=sk-ci-not-a-real-key \
+            -e LUNELLE_IMAGE_MODEL=mock-model \
+            -e LUNELLE_HOST=0.0.0.0 \
+            -p 8300:8300 lunelle-studio:ci
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8300/health >/dev/null 2>&1; then
+              echo "healthy"; break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8300/health
+          curl -fsS http://127.0.0.1:8300/ready
+      - name: Graceful shutdown
+        run: |
+          start=$(date +%s)
+          docker stop lunelle-ci
+          echo "stopped in $(( $(date +%s) - start ))s (SIGTERM must be honoured)"
+      - name: Container logs
+        if: always()
+        run: docker logs lunelle-ci 2>&1 | tail -50

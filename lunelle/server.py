@@ -49,7 +49,7 @@ from .schemas import (
 from .stats import collect_stats
 from .styles import StyleInputError, build_style_spec
 from .tasks import ConflictError, NotFoundError, TaskService
-from .urlguard import UnsafeUrl, assert_safe_request_url
+from .urlguard import UnsafeUrl, assert_safe_request_url, configure_allow_private_hosts
 from .worker import Worker
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,10 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         problems = config.validate_for_serve()
         if problems:
             raise RuntimeError("configuration invalid:\n- " + "\n- ".join(problems))
+        # Publish the private-host policy to the outbound request guard before
+        # anything can make a request. Defaults to blocking, so this only ever
+        # widens the policy deliberately.
+        configure_allow_private_hosts(config.allow_private_api_hosts)
         config.ensure_dirs()
         db = Database(config.db_path)
         migrate(db.conn())
@@ -134,7 +138,7 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
     @app.exception_handler(CostConfirmationRequired)
     async def _needs_confirmation(_req, exc):
         # 409 + the estimate: the client is expected to show it and re-submit
-        # with confirm_estimated_usd, not to retry blindly.
+        # with confirm_max_usd, not to retry blindly.
         return JSONResponse(
             status_code=409,
             content={"error": str(exc), "code": "cost_confirmation_required",
@@ -493,7 +497,7 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
             plan = request.app.state.service.create_matrix_generation(
                 style_id, tones=body.tones or None, views=body.views or None,
                 force=body.force, note=body.note,
-                confirmed_usd=body.confirm_estimated_usd,
+                confirmed_max_usd=body.confirm_max_usd,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -504,6 +508,16 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
     def budget(request: Request):
         """Rolling-window spend against the cap. Admin-only: it reveals business volume."""
         return spend_snapshot(request.app.state.db, config).as_dict()
+
+    @app.get("/api/tasks/{task_id}/lineage", dependencies=[Depends(require_admin)])
+    def task_lineage(task_id: str, request: Request):
+        """Shared automatic-work budget for this task's lineage.
+
+        Automatic re-generation and correction draw from ONE allowance per root, so
+        this is where an operator sees whether the system stopped trying because
+        the budget ran out rather than because something broke.
+        """
+        return request.app.state.service.lineage_for(task_id)
 
     @app.get("/api/tasks")
     def list_tasks(request: Request,

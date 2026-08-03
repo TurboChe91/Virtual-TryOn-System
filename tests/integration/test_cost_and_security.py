@@ -91,10 +91,35 @@ class TestCostConfirmation:
         with TestClient(app) as client:
             style_id = new_style(client, app, config)
             response = client.post(f"/api/styles/{style_id}/matrix",
-                                   json={"confirm_estimated_usd": 0.01})
+                                   json={"confirm_max_usd": 0.01})
             assert response.status_code == 409
             assert "mismatch" in response.json()["error"]
             assert client.get("/api/tasks").json()["tasks"] == []
+
+    def test_confirming_the_estimate_instead_of_the_ceiling_is_refused(self, tmp_path):
+        """The authorized figure is the worst case. Echoing the expected cost —
+        what the old confirm_estimated_usd field asked for — must not authorize."""
+        config, app = build(tmp_path, confirm_cost_usd=0.10)
+        with TestClient(app) as client:
+            style_id = new_style(client, app, config)
+            estimate = client.post(f"/api/styles/{style_id}/matrix/estimate",
+                                   json={}).json()
+            assert estimate["confirm_max_usd"] > estimate["estimated_usd"]
+            response = client.post(
+                f"/api/styles/{style_id}/matrix",
+                json={"confirm_max_usd": estimate["estimated_usd"]})
+            assert response.status_code == 409
+            assert "ceiling" in response.json()["error"]
+            assert client.get("/api/tasks").json()["tasks"] == []
+
+    def test_old_field_name_is_rejected(self, tmp_path):
+        """extra="forbid" makes the rename loud rather than silently ignored."""
+        config, app = build(tmp_path, confirm_cost_usd=0.10)
+        with TestClient(app) as client:
+            style_id = new_style(client, app, config)
+            response = client.post(f"/api/styles/{style_id}/matrix",
+                                   json={"confirm_estimated_usd": 0.8})
+            assert response.status_code == 422
 
     def test_correct_confirmation_queues_the_batch(self, tmp_path):
         config, app = build(tmp_path, confirm_cost_usd=0.10)
@@ -104,7 +129,7 @@ class TestCostConfirmation:
                                    json={}).json()
             response = client.post(
                 f"/api/styles/{style_id}/matrix",
-                json={"confirm_estimated_usd": estimate["estimated_usd"]})
+                json={"confirm_max_usd": estimate["confirm_max_usd"]})
             assert response.status_code == 202
             assert len(response.json()["created"]) == 16
 

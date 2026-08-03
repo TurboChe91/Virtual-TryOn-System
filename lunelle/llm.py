@@ -81,6 +81,7 @@ def build_llm_chat(config: Config, db: Database) -> ChatFn:
                     f"{base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {api_key}"},
                     json=body,
+                    follow_redirects=False,
                 )
         except httpx.HTTPError as exc:
             raise RuntimeError(f"LLM request failed: {redact(str(exc))}") from exc

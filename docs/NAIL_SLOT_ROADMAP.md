@@ -214,6 +214,33 @@ SSRF 的一个**已知边界**（写在 `urlguard.py` 里而不是掩盖）：DN
 而把 DNS 故障当成永久配置错误会误判——provider 层本来就把 DNS 失败归类为可重试的
 `dns` 错误，那才是正确行为。
 
+### 第 1.5 阶段 成本与安全加固（已实施，迁移 0006）
+
+| 项 | 实现 | 验证 |
+|---|---|---|
+| 1. 确认上限而非预计值 | `requires_confirmation` 与授权字段都改用 **worst_case**；字段更名 `confirm_max_usd` | `test_confirm_max_usd_is_the_worst_case_not_the_estimate`、`test_confirming_the_estimate_instead_of_the_ceiling_is_refused`、`test_old_field_name_is_rejected`（422） |
+| 2. 统一 lineage 预算 | `generation_lineages`（root_task_id / descendant_count / lineage_spent_usd / lineage_max_usd）；两条自动路径共用 `claim_lineage_descendant` | `test_alternating_paths_cannot_reset_each_other`、`test_regeneration_chain_stops_at_the_shared_budget` |
+| 3. 预算预占/结算 | `spend_reservations`：调用前事务内预占，成功按实际费用 settle，失败 release 或按已知费用结算；队列授权移入写事务 | 20 线程抢 5 个额度 → 恰好 5；12 线程抢 3 个 lineage 槽 → 恰好 3；4 worker 抢 3 次调用额度 → `provider.calls == 3` |
+| 4. SSRF 统一到安全层 | `guard_request_url` 为唯一出网校验点；`_post`/`_download`/`build_chat_fn`/LLM chat 全部接入，每次请求前校验 | 10 个恶意图片 URL 全部拒绝且 **download 调用数为 0**；重定向到内网不被跟随 |
+| 5. QA 崩溃恢复 | `Worker.recover_interrupted_qa()`：有文件重跑本地 QA（0 次付费调用），无文件标 `qa_state=error` | `test_qa_recovery.py` 8 项，含「重跑后撤销旧批准」 |
+| 6. CI 与测试卫生 | GitHub Actions（3.12 + 3.14 矩阵、migrations、docker 三个 job）、faulthandler 硬超时、worker 线程泄漏断言 | 3.12 实跑 **336 passed**；泄漏断言用故意泄漏的探针验证过会失败 |
+
+**过程中发现并修复的两个真实缺陷**（都不是测试问题）：
+
+1. **浮点边界**：`0.05+0.05+0.05 == 0.15000000000000002 > 0.15`，导致刚好用完预算的
+   那次调用被误拒。金额比较改为带 `EPSILON_USD` 容差，并加了针对该边界的回归测试。
+2. **mock provider 报 `actual_cost_usd=0.0`**：结算时把整笔预占释放为 0，预算闸门在
+   测试下比生产宽松得多（真实 OpenAI 兼容接口一律不回报费用，返回 `None`）。这与上一
+   轮「mock 图只有 3KB 掩盖了 QA 闸门」是同一类问题：不真实的 mock 会掩盖真实缺陷。
+
+**关于「worst_case 是否真的是上限」**：现在是。旧方案里 `auto_regen_depth` 与
+`auto_correct_depth` 各记各的，且子任务不继承对方的计数器，因此
+regen → correct → regen 可以无限交替。已用一个复刻旧逻辑的脚本证实：40 跳测试上限内
+**从未终止**（$2.00 且继续增长），新的共享预算在 2 跳停止（$0.10，与报价一致）。
+
+`LUNELLE_AUTO_REGEN_MAX` 保留其文档语义作为**总开关**（0 = 完全禁用自动工作），
+但「允许多少」不再由它决定，而是共享的 `LUNELLE_MAX_LINEAGE_DESCENDANTS`。
+
 ### 第三阶段 快照与版本冻结
 迁移 0006、`tasks.py`（input_fingerprint、lineage、依赖失败传播）、`publish.py`
 （原子化 + 版本化 key）、`export.py`

@@ -28,6 +28,7 @@ from pathlib import Path
 from .config import ConfigError, load_config
 from .db import Database, migrate
 from .logging_setup import setup_logging
+from .urlguard import configure_allow_private_hosts
 
 
 def _service(config):
@@ -321,6 +322,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command != "serve":
         setup_logging(config.log_dir, "WARNING", console=False)
+    # CLI commands make provider calls too, so the outbound guard needs the same
+    # policy the server sets. Without this it would stay at its safe default and
+    # a legitimately self-hosted endpoint would be blocked from the CLI only.
+    configure_allow_private_hosts(config.allow_private_api_hosts)
     try:
         return COMMANDS[args.command](config, args)
     except ConfigError as exc:
