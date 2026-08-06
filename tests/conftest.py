@@ -193,7 +193,8 @@ def write_test_image(path: Path, size=(64, 64), color=(200, 170, 150)) -> Path:
 def satisfy_matrix_dependencies(db, config, service, style_id: str,
                                 tones=("light", "medium", "tan", "deep"),
                                 views=("p2_open_hands", "p3_right_hand",
-                                       "p4_thumb_visible", "p5_left_hand")) -> None:
+                                       "p4_thumb_visible", "p5_left_hand"),
+                                hand_size=(256, 256)) -> None:
     """Give a style the inputs a matrix cell hard-requires: a design authority
     (plan image) and a hand model per tone+view. Matrix cells now block instead
     of degrading to a text-only render, so tests of the success path must supply
@@ -208,7 +209,7 @@ def satisfy_matrix_dependencies(db, config, service, style_id: str,
         for tone in tones:
             for view in views:
                 hand = write_test_image(
-                    config.upload_dir / f"hand-{tone}-{view}.png", (256, 256))
+                    config.upload_dir / f"hand-{tone}-{view}.png", hand_size)
                 conn.execute(
                     "INSERT INTO app_settings (key, value, updated_at) VALUES (?,?,?)"
                     " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"

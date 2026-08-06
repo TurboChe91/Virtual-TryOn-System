@@ -43,6 +43,7 @@ BASE_NEGATIVE = (
     "text, letters, numbers, labels, boxes, grid lines, logo, watermark, signature, "
     "extra fingers, six fingers, missing fingers, fused fingers, deformed hand, "
     "broken anatomy, distorted knuckles, second pair of hands, "
+    "stretched hand, elongated fingers, squashed hand, distorted proportions, "
     "cartoon, illustration, anime, painting, 3d render look, plastic skin, "
     "flat stickers, printed decals, blurry, lowres, jpeg artifacts"
 )
@@ -239,6 +240,19 @@ MATRIX_REFERENCE_BLOCK = """INPUT AUTHORITY — do not mix these roles:
 """
 
 
+def matrix_visible_nails(view: str) -> list[str] | None:
+    """Nail ids this view can physically show, or None for an unknown view.
+
+    p3/p5 show a single hand, so they show 5 nails; judging them against 10 fails
+    them for anatomy the contract itself specifies.
+    """
+    view_doc = MATRIX_CONTRACT["views"].get(view)
+    if not view_doc:
+        return None
+    nails = view_doc.get("visible_nails")
+    return list(nails) if nails else None
+
+
 def build_matrix_prompt(spec: StyleSpec, identity_text: str | None,
                         tone: str, view: str, with_reference: bool) -> str:
     view_doc = MATRIX_CONTRACT["views"][view]
@@ -259,6 +273,7 @@ Hard constraints:
 - Apply only the listed nail designs; nail length and silhouette come from the design authority per nail.
 - Natural press-on attachment: cuticle shadows, glossy topcoat, curved highlights; true material depth for pearls, crystals, and metal.
 - Preserve the exact base-photo hand count and view scope; never add another hand to a single-hand view.
+- Preserve the base photo's true hand and finger proportions. Never stretch, squash, elongate, or rescale the hand to fill the frame; if the frame does not match, keep the anatomy correct.
 - No text, labels, boxes, arrows, grid lines, logos, or watermarks."""
 
 

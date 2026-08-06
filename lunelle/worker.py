@@ -30,6 +30,7 @@ from .budget import (
 )
 from .config import Config
 from .db import Database
+from .geometry import size_from_reference
 from .logging_setup import task_logger
 from .models import (
     ERROR_BUDGET_EXCEEDED,
@@ -42,7 +43,7 @@ from .models import (
     QA_RUNNING,
 )
 from .profiles import ProviderResolver
-from .prompts import strip_reference_block
+from .prompts import matrix_visible_nails, strip_reference_block
 from .providers import GenerationRequest, ImageProvider, ProviderError
 from .qa import run_qa, store_qa_result
 from .snapshots import record_execution
@@ -189,7 +190,7 @@ class Worker:
             prompt = strip_reference_block(prompt)
             log.info("reference unavailable; stripped reference block from prompt",
                      ctx={"stage": "reference"})
-        size = self._size_for(task["output_type"])
+        size = self._size_for(task["output_type"], task)
         extra: dict[str, str] = {}
         if task["output_type"] == OUTPUT_HERO and task["model"].startswith("gpt-image"):
             # Listing heroes are final assets; draft tiers are chosen per profile model.
@@ -396,7 +397,7 @@ class Worker:
                 continue
             try:
                 task = self.service.get_task(task_id, with_details=False)
-                size = self._size_for(task["output_type"])
+                size = self._size_for(task["output_type"], task)
                 grid_path = None
                 if task["output_type"] == OUTPUT_WEARING:
                     grid_task = self.service.latest_successful_grid(task["style_id"])
@@ -453,9 +454,22 @@ class Worker:
             if candidate.is_file():
                 images.append(candidate)
                 break
+        # For a cell, the base hand photo goes in as Image 3: without it the judge
+        # cannot see that the hand was stretched, which is the one defect a human
+        # spots instantly. Only this view's nails are in frame, so pass that list
+        # too rather than letting the judge assume 10.
+        visible_nails: list[str] | None = None
+        if task["output_type"] == OUTPUT_MATRIX_CELL:
+            metadata = task.get("metadata") or {}
+            tone, view = metadata.get("tone"), metadata.get("view")
+            if tone and view:
+                hand = self._hand_model_for(tone, view)
+                if hand is not None:
+                    images.append(hand)
+                visible_nails = matrix_visible_nails(view)
         try:
             verdict = auto_qa_verdict(chat, images, style.get("identity_text") or "",
-                                      task["output_type"])
+                                      task["output_type"], visible_nails=visible_nails)
         except (RuntimeError, ValueError):
             log.warning("llm qa failed; leaving human review flag set", ctx={"stage": "qa"})
             return
@@ -542,11 +556,23 @@ class Worker:
             # thing this budget exists to prevent.
             logger.exception("automatic %s scheduling failed after claiming a slot", kind)
 
-    def _size_for(self, output_type: str) -> tuple[int, int]:
+    def _size_for(self, output_type: str, task: dict | None = None) -> tuple[int, int]:
         if output_type == OUTPUT_GRID:
             return self.config.grid_size
         if output_type == OUTPUT_HERO:
             return self.config.hero_size
+        if output_type == OUTPUT_MATRIX_CELL and task is not None:
+            # A cell must come out the shape of its base hand photo. Asking for a
+            # square against a 4:3 base stretched the hand on every cell, because
+            # `size` is a hard API constraint and "match the crop" is only prose.
+            metadata = task.get("metadata") or {}
+            tone, view = metadata.get("tone"), metadata.get("view")
+            if tone and view:
+                hand = self._hand_model_for(tone, view)
+                if hand is not None:
+                    derived = size_from_reference(hand)
+                    if derived is not None:
+                        return derived
         return self.config.wearing_size
 
     def _hand_model_for(self, tone: str, view: str) -> Path | None:

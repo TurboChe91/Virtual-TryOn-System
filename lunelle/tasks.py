@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .config import Config
 from .db import Database, transaction, utcnow
+from .geometry import size_from_reference
 from .models import (
     CANCELLED,
     CLAIMABLE_STATUSES,
@@ -546,13 +547,35 @@ class TaskService:
             ).fetchone()
             if grid and grid["output_path"] and Path(grid["output_path"]).is_file():
                 paths.append(Path(grid["output_path"]))
-        hand = conn.execute(
+        hand = self._matrix_hand_model(conn, tone, view)
+        if hand is not None:
+            paths.append(hand)
+        return paths
+
+    @staticmethod
+    def _matrix_hand_model(conn, tone: str, view: str) -> Path | None:
+        """The base hand photo for one cell, or None if it is not configured."""
+        row = conn.execute(
             "SELECT value FROM app_settings WHERE key = ?",
             (f"hand_model_{tone}_{view}",),
         ).fetchone()
-        if hand and Path(hand["value"]).is_file():
-            paths.append(Path(hand["value"]))
-        return paths
+        if row and Path(row["value"]).is_file():
+            return Path(row["value"])
+        return None
+
+    def _matrix_cell_size(self, conn, tone: str, view: str) -> tuple[int, int]:
+        """Request size for one cell: the base hand photo's aspect ratio.
+
+        Falls back to the configured wearing size when the hand model is missing —
+        such a cell is blocked as `dependency_missing` before it ever reaches the
+        provider, so the value only has to be present, not meaningful.
+        """
+        hand = self._matrix_hand_model(conn, tone, view)
+        if hand is not None:
+            derived = size_from_reference(hand)
+            if derived is not None:
+                return derived
+        return self.config.wearing_size
 
     def _matrix_axes(self, tones: list[str] | None,
                      views: list[str] | None) -> tuple[list[str], list[str]]:
@@ -652,7 +675,7 @@ class TaskService:
                         conn, style=style, output_type=OUTPUT_MATRIX_CELL, prompt=prompt,
                         negative_prompt="", prompt_version=MATRIX_PROMPT_VERSION,
                         provider=provider_name, model=model,
-                        size=self.config.wearing_size, profile_row=profile_row,
+                        size=self._matrix_cell_size(conn, tone, view), profile_row=profile_row,
                         input_paths=cell_inputs, asset_kind="hand_model",
                         extra={"tone": tone, "view": view},
                     )

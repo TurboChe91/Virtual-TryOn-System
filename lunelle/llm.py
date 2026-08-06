@@ -158,14 +158,43 @@ AUTO_QA_SYSTEM = (
     "generated image against its design authority and output a strict JSON verdict."
 )
 
+#: What each output type is SUPPOSED to look like. Without this the judge invented
+#: its own contract: it failed matrix cells for being "a hand photo, not a
+#: matrix_cell image", when a worn hand photo is exactly what a cell is. An enum
+#: name is not a specification — the judge cannot infer one from the string.
+_LAYOUT_CONTRACT = {
+    "grid": (
+        "a flat 2-row x 5-column product grid of exactly 10 press-on nails on a plain "
+        "background. NO hands, fingers, or skin may appear."
+    ),
+    "hero": (
+        "a styled marketing photo of hands wearing the set. Hands ARE expected. Judge "
+        "the manicure, not the presence of hands."
+    ),
+    "matrix_cell": (
+        "a photo of REAL HANDS wearing the set, reproducing a specific base hand pose. "
+        "Hands ARE expected and required — a hand photo is correct, not a defect. This is "
+        "NOT a grid: never require a 2x5 layout, and never ask for nails to be detached "
+        "or laid flat."
+    ),
+}
+
 AUTO_QA_USER = """Image 1 is the GENERATED candidate.
 Image 2 (if present) is the design authority (plan/reference).
+Image 3 (if present) is the immutable base hand photo the candidate had to reproduce.
 Design identity (authoritative when present):
 {identity}
 
-Check the candidate strictly: correct nail count and layout for a {output_type} image;
-every nail matches its identity (colors, motif counts, placement); no swapped, duplicated,
-omitted, or invented designs; no text or watermarks; sound hand anatomy if hands are shown.
+The candidate is a {output_type} image, which must be: {layout_contract}
+
+{count_rule}
+
+Check the candidate strictly: every visible nail matches its identity (colors, motif
+counts, placement); no swapped, duplicated, omitted, or invented designs; no text or
+watermarks; sound hand anatomy if hands are shown.
+When Image 3 is present, also verify the candidate did not distort it: hand and finger
+proportions, pose, crop, and skin tone must match Image 3. Report stretched, squashed,
+or elongated hands/fingers as a defect.
 
 Output ONE JSON object only:
 {{"passed": true|false,
@@ -176,10 +205,29 @@ Name ONLY the wrong slots, give set-wide motif COUNT LOCKS
 and end with which nails must stay completely untouched. Empty string if passed.>"}}"""
 
 
-def auto_qa_verdict(chat: ChatFn, images: list[Path], identity: str, output_type: str) -> dict:
+def auto_qa_verdict(chat: ChatFn, images: list[Path], identity: str, output_type: str,
+                    *, visible_nails: list[str] | None = None) -> dict:
+    """Advisory vision verdict.
+
+    `visible_nails` is the set of nail ids this view can physically show. It must be
+    passed for matrix cells: p3/p5 show one hand (5 nails), so judging every view
+    against 10 fails the single-hand views on anatomy the contract already dictates.
+    """
+    if visible_nails:
+        count_rule = (
+            f"This view shows exactly {len(visible_nails)} nails: "
+            f"{', '.join(visible_nails)}. Judge ONLY these. Requiring any other count "
+            "is wrong — nails not in this list are legitimately out of frame, which is "
+            "not a defect."
+        )
+    else:
+        count_rule = "Exactly 10 nails (nail-01..nail-10) must be present and correct."
     reply = chat(AUTO_QA_SYSTEM,
                  AUTO_QA_USER.format(identity=identity or "(none — judge by coherence)",
-                                     output_type=output_type),
+                                     output_type=output_type,
+                                     layout_contract=_LAYOUT_CONTRACT.get(
+                                         output_type, "judged by internal coherence"),
+                                     count_rule=count_rule),
                  images)
     doc = extract_json(reply)
     return {

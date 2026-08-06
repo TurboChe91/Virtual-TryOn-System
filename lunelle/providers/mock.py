@@ -52,6 +52,9 @@ class MockImageProvider(ImageProvider):
         self._fail_with = fail_with
         self._fail_times = fail_times
         self._calls = 0
+        #: Every size actually requested, in call order. Lets a test assert what
+        #: reached the provider rather than what the caller meant to send.
+        self.requested_sizes: list[tuple[int, int]] = []
 
     @property
     def calls(self) -> int:
@@ -60,6 +63,7 @@ class MockImageProvider(ImageProvider):
 
     def generate(self, request: GenerationRequest) -> GenerationResult:
         self._calls += 1
+        self.requested_sizes.append((request.size[0], request.size[1]))
         if self._fail_with is not None and (self._fail_times == 0 or self._calls <= self._fail_times):
             raise self._fail_with
 
