@@ -118,22 +118,53 @@ def extract_json(text: str) -> dict:
 
 IDENTITY_SYSTEM = (
     "You are a senior press-on-nail product analyst. You describe nail designs "
-    "precisely, in English, for an image-generation identity contract."
+    "precisely, in English, for an image-generation identity contract. You report "
+    "only what is visibly present, you count decorations one by one, and you state "
+    "left/right and top/bottom from the viewer's perspective of the flat plan image. "
+    "An identity file is a manufacturing contract: a wrong direction or count is "
+    "reproduced faithfully by the image model and ruins the product."
 )
 
-IDENTITY_USER = """Look at this press-on nail set image (a 2x5 plan grid of ten nails, or a worn set).
-Write the per-nail identity file in EXACTLY this format, one line per nail, nail-01 through nail-10:
+#: Written against observed failures, not in the abstract. On the first real style
+#: the model reversed the wave direction on nail-01 and nail-03 and undercounted
+#: nail-03's rhinestones; the image model then executed those errors exactly, which
+#: is indistinguishable from a generation fault. Hence the explicit per-cell
+#: addressing, the count-out-loud rule, and the mirror warning.
+IDENTITY_USER = """This image is a 2x5 plan grid of ten press-on nails, laid flat.
 
-- nail-01: <colors, motifs with counts, decorations, finish>. Shape hint: <length + silhouette>.
+Address the cells by POSITION, not by reading order intuition:
+  TOP row,    left to right = nail-01, nail-02, nail-03, nail-04, nail-05
+  BOTTOM row, left to right = nail-06, nail-07, nail-08, nail-09, nail-10
+
+Work one cell at a time. For each cell, before writing its line, do this silently:
+1. Locate the cell by its row and column position above.
+2. Name the base: colour, material and finish (e.g. "deep emerald green shimmery
+   glossy", "brushed champagne gold matte-metallic").
+3. Name the dominant motif, if any, and where it sits (centre / upper third / along
+   one edge). Common motifs here: oval bezel-set cabochon, cross, four-petal cross,
+   eight-pointed star charm, organic wave metal accent.
+4. COUNT each kind of small decoration individually — spherical studs, round
+   rhinestones, star studs. Count them, do not estimate. If you cannot resolve an
+   exact count, write "several" rather than inventing a number.
+5. For anything with a direction (waves, half-and-half colour splits, off-centre
+   placement), state which EDGE it runs along or which SIDE is which, as seen in
+   this flat image: left, right, top, bottom. Do not mirror it. A wave along the
+   right edge must never be described as along the left.
+
+Then output the identity file in EXACTLY this format, one line per nail:
+
+- nail-01: <base colour+material+finish>, <motif and placement>, <counted
+  decorations with their placement>. Shape hint: <length + silhouette>.
 - nail-02: ...
 (continue through nail-10)
 
 Rules:
-- Grid order is authoritative when a 2x5 grid is shown:
-  top row left-to-right = nail-01..05, bottom row = nail-06..10.
-- Name concrete visible features (exact motif counts, materials, placement); never vague style labels.
-- If two nails are near-twins, say so and state the distinguishing detail.
-- End with one line starting "SET-WIDE:" that locks the shared palette and materials.
+- Describe only what is visible in that cell. Never copy a neighbour's features.
+- Near-twins are common in these sets and are the easiest thing to get wrong. When
+  two nails are near-identical, say "Near twin to nail-XX" and state the ONE
+  distinguishing detail (usually a mirrored accent or a different count).
+- Never use vague style words ("elegant", "luxurious") — only concrete features.
+- End with one line starting "SET-WIDE:" locking the shared palette and materials.
 Output only the identity text, no preamble."""
 
 STYLE_SYSTEM = (
@@ -237,11 +268,74 @@ def auto_qa_verdict(chat: ChatFn, images: list[Path], identity: str, output_type
     }
 
 
+#: One cell at a time: the model sees a single nail with no neighbours to blend in
+#: and no grid to lose its place in. Whole-plan reading confused near-twins and
+#: mirrored directions; a lone cell removes both failure modes at the cost of ten
+#: cheap text calls.
+IDENTITY_CELL_USER = """This is ONE press-on nail from a ten-nail set, shown flat and
+enlarged. It is {nail_id}.
+
+Describe only this nail, in one line, in this exact format:
+
+- {nail_id}: <base colour + material + finish>, <dominant motif and where it sits>,
+  <each kind of small decoration with an exact count and its placement>. Shape hint:
+  <length + silhouette>.
+
+Requirements:
+- COUNT decorations individually (studs, rhinestones, star charms). Do not estimate.
+  If a count is genuinely unresolvable, write "several" rather than guessing.
+- For anything directional — a wave accent, a half-and-half colour split, an
+  off-centre motif — state the EDGE or SIDE as seen in this image: left, right, top,
+  bottom. Do not mirror.
+- Concrete features only; no style adjectives.
+Output only that single line."""
+
+
 def identify_nail_identities(chat: ChatFn, image: Path) -> str:
+    """Whole-plan identity read: one call, ten nails.
+
+    Cheap and usually right on distinctive sets, but it confuses near-twins and has
+    mirrored directional accents in practice. `identify_nail_identities_per_cell`
+    trades ten calls for far better accuracy; prefer it when the set has twins.
+    """
     reply = chat(IDENTITY_SYSTEM, IDENTITY_USER, [image]).strip()
     if "nail-01" not in reply or "nail-10" not in reply:
         raise ValueError("LLM identity reply is missing nail-01..nail-10 lines")
     return reply
+
+
+def identify_nail_identities_per_cell(chat: ChatFn, image: Path, *,
+                                      crop_cell) -> str:
+    """Identity read one cell at a time, then assembled.
+
+    `crop_cell(nail_id) -> Path` supplies the enlarged single-nail crop. Injected
+    rather than imported so this module stays free of image handling and the caller
+    controls where temporary files live.
+
+    A failed cell becomes an explicit "(not resolved)" line instead of being
+    dropped: a missing nail in an identity file reads as "this nail has no design",
+    which is a different and more damaging claim than "we could not read it".
+    """
+    lines = []
+    for index in range(1, 11):
+        nail_id = f"nail-{index:02d}"
+        try:
+            cell = crop_cell(nail_id)
+            reply = chat(IDENTITY_SYSTEM,
+                         IDENTITY_CELL_USER.format(nail_id=nail_id), [cell]).strip()
+        except (RuntimeError, ValueError) as exc:
+            logger.warning("identity cell %s failed: %s", nail_id, str(exc)[:160])
+            lines.append(f"- {nail_id}: (not resolved — describe this nail manually)")
+            continue
+        line = next((raw.strip() for raw in reply.splitlines()
+                     if nail_id in raw and raw.strip()), "")
+        if not line:
+            line = f"- {nail_id}: {reply.splitlines()[0].strip()}" if reply else \
+                   f"- {nail_id}: (not resolved — describe this nail manually)"
+        if not line.startswith("-"):
+            line = f"- {line}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def style_fields_from_image(chat: ChatFn, image: Path) -> dict:

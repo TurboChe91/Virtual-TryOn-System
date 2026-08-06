@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import io
 import random
+from pathlib import Path
 from typing import cast
 
 from PIL import Image, ImageDraw
@@ -55,6 +56,9 @@ class MockImageProvider(ImageProvider):
         #: Every size actually requested, in call order. Lets a test assert what
         #: reached the provider rather than what the caller meant to send.
         self.requested_sizes: list[tuple[int, int]] = []
+        #: Reference image paths per call, same reasoning: nail placement now rides
+        #: on which file arrives as Image 1, so tests need to see it.
+        self.requested_references: list[list[Path]] = []
 
     @property
     def calls(self) -> int:
@@ -64,6 +68,7 @@ class MockImageProvider(ImageProvider):
     def generate(self, request: GenerationRequest) -> GenerationResult:
         self._calls += 1
         self.requested_sizes.append((request.size[0], request.size[1]))
+        self.requested_references.append(list(request.reference_images))
         if self._fail_with is not None and (self._fail_times == 0 or self._calls <= self._fail_times):
             raise self._fail_with
 

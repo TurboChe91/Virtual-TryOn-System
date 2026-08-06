@@ -296,13 +296,48 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
             service.set_plan_image(style_id, dest)
         else:
             service.set_reference_image(style_id, dest)
-        return {"stored": str(dest.name), "kind": kind, "format": fmt, "bytes": len(data)}
+
+        # A new plan supersedes any identity derived from an older image, so refresh
+        # it here rather than leaving a stale per-nail contract pointing at a design
+        # that is no longer the authority.
+        identity_derived = False
+        identity_error = None
+        if kind == "plan":
+            try:
+                from .llm import (
+                    LLMUnavailable,
+                    build_llm_chat,
+                    identify_nail_identities,
+                )
+
+                chat = build_llm_chat(config, request.app.state.db)
+                service.set_identity_text(style_id, identify_nail_identities(chat, dest))
+                identity_derived = True
+            except LLMUnavailable:
+                identity_error = "no LLM channel configured"
+            except (RuntimeError, ValueError) as exc:
+                identity_error = str(exc)[:200]
+            if identity_error:
+                logger.warning("identity derivation failed for %s: %s",
+                               style_id, identity_error)
+        return {"stored": str(dest.name), "kind": kind, "format": fmt,
+                "bytes": len(data), "identity_derived": identity_derived,
+                "identity_error": identity_error}
 
     @app.post("/api/styles/from-image", status_code=201, dependencies=[Depends(require_admin)])
     async def create_style_from_image(request: Request,
                                       file: UploadFile = File(...),  # noqa: B008 - FastAPI idiom
-                                      sku: str = Query("", max_length=48)):
-        """Customer flow B: upload a design photo, let the vision LLM draft the style."""
+                                      sku: str = Query("", max_length=48),
+                                      kind: str = Query("plan",
+                                                        pattern="^(reference|plan)$")):
+        """Customer flow B: upload a design photo, let the vision LLM draft the style.
+
+        `kind` defaults to plan because the usual upload IS the 2x5 set plan, and the
+        plan is the design authority every downstream step reads. Storing it as a mere
+        reference left `plan_image_path` empty, and matrix cells then fell back to
+        "the most recent successful grid" — i.e. copying an earlier generated image
+        instead of the operator's actual design. Pass kind=reference for a worn photo.
+        """
         from . import vocab
         from .llm import LLMUnavailable, build_llm_chat, style_fields_from_image
 
@@ -332,16 +367,40 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         outcome = build_style_spec(body, service.taken_skus())
         style = service.create_style(
             outcome.spec, source_type="hybrid",
-            source_input={"from_image": True, **body.model_dump()},
+            source_input={"from_image": True, "uploaded_as": kind, **body.model_dump()},
             parser="vision-llm", warnings=outcome.warnings,
         )
-        dest = config.upload_dir / style["style_id"] / f"ref-{digest}{ext}"
+        prefix = "plan" if kind == "plan" else "ref"
+        dest = config.upload_dir / style["style_id"] / f"{prefix}-{digest}{ext}"
         dest.parent.mkdir(parents=True, exist_ok=True)
         staging.replace(dest)
-        service.set_reference_image(style["style_id"], dest)
+        if kind == "plan":
+            service.set_plan_image(style["style_id"], dest)
+        else:
+            service.set_reference_image(style["style_id"], dest)
+
+        # Per-nail identity is a precondition for the matrix getting nail order right,
+        # and it is derivable from the image we already have. Deriving it on demand
+        # rather than leaving it to a remembered manual step is the difference between
+        # "distribute these elements tastefully" and an actual per-nail contract.
+        identity_error = None
+        try:
+            from .llm import identify_nail_identities
+
+            identity = identify_nail_identities(chat, dest)
+            service.set_identity_text(style["style_id"], identity)
+        except (RuntimeError, ValueError) as exc:
+            # Non-fatal: the style exists and is editable. Say so rather than
+            # pretending the style is fully specified.
+            identity_error = str(exc)[:200]
+            logger.warning("identity derivation failed for %s: %s",
+                           style["style_id"], identity_error)
+
         style = service.get_style(style["style_id"])
         return {"style": style, "recognized": fields, "warnings": outcome.warnings,
-                "parser": "vision-llm"}
+                "parser": "vision-llm", "uploaded_as": kind,
+                "identity_derived": identity_error is None,
+                "identity_error": identity_error}
 
     @app.post("/api/styles/{style_id}/identify", dependencies=[Depends(require_admin)])
     def identify_style(style_id: str, request: Request):

@@ -534,19 +534,16 @@ class TaskService:
 
     def _matrix_input_paths(self, conn, style: dict, tone: str, view: str) -> list[Path]:
         """Design authority then hand model, in the order the provider receives
-        them (Image 1 = design, Image 2 = base hand)."""
+        them (Image 1 = design, Image 2 = base hand).
+
+        Only an uploaded plan counts as the design authority here. The worker
+        refuses a cell whose authority would be a generated grid, so accepting one
+        at queue time would freeze an input into the snapshot that never gets used.
+        """
         paths: list[Path] = []
         plan = Path(style.get("plan_image_path") or "")
         if plan.is_file():
             paths.append(plan)
-        else:
-            grid = conn.execute(
-                "SELECT output_path FROM tasks WHERE style_id = ? AND output_type = ?"
-                " AND status = ? ORDER BY completed_at DESC LIMIT 1",
-                (style["style_id"], OUTPUT_GRID, SUCCESS),
-            ).fetchone()
-            if grid and grid["output_path"] and Path(grid["output_path"]).is_file():
-                paths.append(Path(grid["output_path"]))
         hand = self._matrix_hand_model(conn, tone, view)
         if hand is not None:
             paths.append(hand)

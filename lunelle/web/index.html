@@ -249,10 +249,17 @@
             <option>short</option><option>medium</option><option>long</option>
             <option>extra-long</option></select></div>
         </div>
-        <label>参考图（可选，作为设计与风格参考）</label>
+        <label>设计图（可选）</label>
         <div class="flex">
           <input id="f_ref" type="file" accept="image/png,image/jpeg,image/webp" style="width:auto; padding:8px">
+          <select id="f_ref_kind" style="width:auto">
+            <option value="plan">款式图（2×5 设计稿，作为设计权威）</option>
+            <option value="reference">参考图（成品照／风格参考）</option>
+          </select>
         </div>
+        <p class="muted" style="margin:6px 0 0; font-size:12px">
+          试戴矩阵要求款式图；只有参考图时矩阵会被拦下，不会拿生成图当设计依据。
+        </p>
         <div class="flex" style="margin-top:20px">
           <button class="primary" onclick="createStyle(true)">创建并出图</button>
           <button class="quiet" onclick="createStyle(false)">仅创建</button>
@@ -262,7 +269,13 @@
       <div class="cpanel" id="paneImage" style="display:none">
         <div class="drop" onclick="$('#imgPick').click()">
           <b>选择设计图</b>
-          成品照或款式图均可；识别颜色、元素与甲型后自动建立款式，原图存为参考图
+          识别颜色、元素与甲型后自动建立款式，并从图中反推逐甲身份
+        </div>
+        <div class="flex" style="margin-top:10px">
+          <select id="imgKind" style="width:auto">
+            <option value="plan">这是款式图（2×5 设计稿）</option>
+            <option value="reference">这是成品照／风格参考</option>
+          </select>
         </div>
         <input id="imgPick" type="file" accept="image/png,image/jpeg,image/webp" style="display:none">
         <p class="muted" id="imgMsg" style="margin:12px 0 0; font-size:12.5px"></p>
@@ -363,9 +376,13 @@ async function createStyle(alsoGenerate){
     const out = await api('/api/styles', {method:'POST', body: JSON.stringify(body)});
     let msg = '已创建 ' + out.style.sku;
     if ($('#f_ref').files.length) {
-      await upload(`/api/styles/${out.style.style_id}/reference-image?kind=reference`,
-                   $('#f_ref').files[0]);
-      msg += '，参考图已上传';
+      const kind = $('#f_ref_kind').value;
+      const up = await upload(
+        `/api/styles/${out.style.style_id}/reference-image?kind=${kind}`,
+        $('#f_ref').files[0]);
+      msg += kind === 'plan' ? '，款式图已上传' : '，参考图已上传';
+      if (up && up.identity_derived) msg += '，已识别逐甲身份';
+      else if (up && up.identity_error) msg += '（逐甲身份识别失败：' + up.identity_error + '）';
       $('#f_ref').value = '';
     }
     if (alsoGenerate) {
@@ -380,9 +397,13 @@ $('#imgPick').addEventListener('change', async () => {
   if (!$('#imgPick').files.length) return;
   $('#imgMsg').textContent = '识别中…';
   try {
-    const out = await upload('/api/styles/from-image', $('#imgPick').files[0]);
+    const kind = $('#imgKind').value;
+    const out = await upload(`/api/styles/from-image?kind=${kind}`, $('#imgPick').files[0]);
     $('#imgMsg').textContent = '';
-    toast(`已识别并创建 ${out.style.name}（${out.style.sku}）`, 5000);
+    let msg = `已识别并创建 ${out.style.name}（${out.style.sku}）`;
+    if (out.identity_derived) msg += '，逐甲身份已写入';
+    else if (out.identity_error) msg += '；逐甲身份未能识别，请在款式页补写';
+    toast(msg, 6000);
     refreshAll(); go('library');
   } catch(e){
     $('#imgMsg').textContent = '';

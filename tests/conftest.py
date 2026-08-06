@@ -190,6 +190,32 @@ def write_test_image(path: Path, size=(64, 64), color=(200, 170, 150)) -> Path:
     return path
 
 
+def write_test_plan(path: Path, size=(500, 250)) -> Path:
+    """A plan image with ten detectable nail blobs in a 2x5 grid.
+
+    A flat colour block is decodable but has no cells to find, so the worker would
+    fall back to the raw plan and the view-plan path would go untested.
+    """
+    from PIL import Image, ImageDraw
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", size, (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    width, height = size
+    margin = width * 0.06
+    slot = (width - 2 * margin) / 5
+    for row in range(2):
+        for col in range(5):
+            cx = margin + slot * col + slot / 2
+            cy = height * (0.27 + 0.46 * row)
+            rx, ry = slot * 0.28, height * 0.16
+            index = row * 5 + col + 1
+            draw.ellipse([cx - rx, cy - ry, cx + rx, cy + ry],
+                         fill=(40, 80 + index * 11, 60))
+    image.save(path)
+    return path
+
+
 def satisfy_matrix_dependencies(db, config, service, style_id: str,
                                 tones=("light", "medium", "tan", "deep"),
                                 views=("p2_open_hands", "p3_right_hand",
@@ -202,7 +228,7 @@ def satisfy_matrix_dependencies(db, config, service, style_id: str,
     """
     from lunelle.db import transaction, utcnow
 
-    plan = write_test_image(config.upload_dir / f"plan-{style_id}.png", (256, 256))
+    plan = write_test_plan(config.upload_dir / f"plan-{style_id}.png")
     service.set_plan_image(style_id, plan)
     conn = db.conn()
     with transaction(conn):

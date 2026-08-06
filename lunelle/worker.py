@@ -42,8 +42,10 @@ from .models import (
     QA_ERROR,
     QA_RUNNING,
 )
+from .nailslots import NAIL_ANATOMY
+from .planview import PlanError, compile_view_plan
 from .profiles import ProviderResolver
-from .prompts import matrix_visible_nails, strip_reference_block
+from .prompts import matrix_view_plan_rows, matrix_visible_nails, strip_reference_block
 from .providers import GenerationRequest, ImageProvider, ProviderError
 from .qa import run_qa, store_qa_result
 from .snapshots import record_execution
@@ -588,16 +590,23 @@ class Worker:
                     return path
         return None
 
-    def _design_authority_for(self, style: dict) -> Path | None:
-        """Plan upload first, else the latest successful grid."""
+    def _design_authority_for(self, style: dict) -> tuple[Path, str] | None:
+        """The design authority and which source it came from.
+
+        Returns (path, source) where source is "plan" or "grid". The caller needs
+        the distinction: an uploaded plan is the operator's actual design, whereas
+        a grid is an image this system generated earlier. Copying from a generated
+        grid compounds its errors into every downstream cell, and because it used
+        to happen silently there was no way to tell the two apart after the fact.
+        """
         plan = Path(style.get("plan_image_path") or "")
         if plan.is_file():
-            return plan
+            return plan, "plan"
         grid_task = self.service.latest_successful_grid(style["style_id"])
         if grid_task and grid_task.get("output_path"):
             grid_path = Path(grid_task["output_path"])
             if grid_path.is_file():
-                return grid_path
+                return grid_path, "grid"
         return None
 
     def _resolve_references(self, task: dict, log) -> list[Path]:
@@ -633,11 +642,16 @@ class Worker:
         if not task["metadata"].get("use_hero_reference"):
             return []
         style = self.service.get_style(task["style_id"])
-        plan = self._design_authority_for(style)
-        if plan is None:
+        resolved = self._design_authority_for(style)
+        if resolved is None:
             log.info("no plan image or grid available; generating hero text-only",
                      ctx={"stage": "reference"})
             return []
+        plan, source = resolved
+        if source == "grid":
+            log.warning("hero using a generated grid as design authority; "
+                        "upload a plan image for a faithful render",
+                        ctx={"stage": "reference", "authority": source})
         references = [plan]
         photo_ref = Path(style.get("reference_image_path") or "")
         if photo_ref.is_file():
@@ -645,23 +659,48 @@ class Worker:
         return references
 
     def _resolve_matrix_references(self, task: dict, log) -> list[Path]:
-        """Image 1 = design authority, Image 2 = the cell tone+view hand model.
+        """Image 1 = design authority compiled into this view's order, Image 2 = hand.
 
         Both are hard requirements. A try-on cell rendered without its base hand
         photo cannot match the pose, skin tone, or crop of the rest of the
         matrix, so it is worthless as a published asset — raising here blocks the
         task instead of billing for an image nobody can use.
+
+        The design authority must be an uploaded plan. A generated grid is accepted
+        everywhere else, but not here: a matrix cell copies its nail art per finger,
+        so basing it on an image this system generated bakes that image's drift into
+        all sixteen cells, and the result is indistinguishable from a faithful one
+        without reading the logs. Blocking follows the same rule as a missing hand
+        model — refuse rather than silently degrade.
+
+        Image 1 is the plan recompiled into this view's screen order rather than the
+        raw 2x5 plan. Prose placement ("screen left-to-right = nail-05, nail-04, ...")
+        asks the model to infer handedness and count fingers, and masked per-nail
+        editing — the obvious alternative — was measured on this channel and does not
+        work: asked to repaint nail-01 (left thumb, centroid x=44.7%, y=71.6%) the
+        model painted the right index finger (x=56.1%, y=42.8%). So the ordering has
+        to be carried by the image the model copies from. If compilation fails the
+        raw plan is still used: a cell with correct art in an uncertain order beats a
+        blocked cell, and the QA judge already reads order.
         """
         if not task["metadata"].get("use_matrix_reference"):
             return []
         tone = task["metadata"].get("tone", "")
         view = task["metadata"].get("view", "")
         style = self.service.get_style(task["style_id"])
-        plan = self._design_authority_for(style)
-        if plan is None:
+        resolved = self._design_authority_for(style)
+        if resolved is None:
             raise DependencyMissing(
-                "no design authority for this style: upload a plan image or "
-                "generate a grid before queueing the try-on matrix"
+                "no design authority for this style: upload the style's plan image "
+                "before queueing the try-on matrix"
+            )
+        plan, source = resolved
+        if source != "plan":
+            raise DependencyMissing(
+                "this style has no uploaded plan image; the only design authority "
+                "available is a previously generated grid, which would make every "
+                "cell a copy of a generated image. Upload the plan image on the "
+                "style page, then retry this cell"
             )
         hand = self._hand_model_for(tone, view)
         if hand is None:
@@ -669,7 +708,29 @@ class Worker:
                 f"no hand model configured for tone={tone!r} view={view!r}: "
                 "upload it on the settings page, then retry this cell"
             )
-        return [plan, hand]
+        return [self._view_plan_for(plan, view, log), hand]
+
+    def _view_plan_for(self, plan: Path, view: str, log) -> Path:
+        """The plan recompiled into `view`'s screen order, or the raw plan on failure."""
+        rows = matrix_view_plan_rows(view)
+        if not rows:
+            log.warning("no screen_slots for this view; using the raw plan",
+                        ctx={"stage": "reference", "view": view})
+            return plan
+        try:
+            compiled = compile_view_plan(
+                plan, view, rows=rows, anatomy=NAIL_ANATOMY,
+                cache_dir=self.config.asset_dir / "viewplans",
+            )
+        except (PlanError, OSError) as exc:
+            # Detection needs a 2x5 grid on a plain background. An unusual plan photo
+            # is an operator-fixable input problem, not a reason to block the cell.
+            log.warning("view-plan compilation failed; using the raw plan",
+                        ctx={"stage": "reference", "view": view, "status": str(exc)})
+            return plan
+        log.info("view-plan compiled for this cell",
+                 ctx={"stage": "reference", "view": view})
+        return compiled
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

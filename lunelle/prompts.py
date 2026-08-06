@@ -217,11 +217,18 @@ Hard constraints:
 
 # ---- try-on matrix (4 tones x 4 views per style) ----------------------------
 #
-# Ported from the predecessor run_imagegen_matrix.py. Image 1 = design authority
-# (plan upload or the latest grid), Image 2 = the configured hand model for the
-# cell's skin tone (pose/skin/background authority). Views and their scene
-# contracts come from contracts/matrix_views.json (content-hashed into the
-# prompt version).
+# Ported from the predecessor run_imagegen_matrix.py. Image 1 = the design
+# authority compiled into this view's screen order (see planview.py), Image 2 =
+# the configured hand model for the cell's skin tone (pose/skin/background
+# authority). Views and their scene contracts come from
+# contracts/matrix_views.json (content-hashed into the prompt version).
+#
+# mx-2 moved per-finger placement out of prose and into Image 1. Prose asked the
+# model to infer handedness and count fingers; masked per-nail editing was measured
+# as the alternative and does not work on this channel (asked to repaint nail-01,
+# the left thumb, the model painted the right index finger). The version is bumped
+# explicitly because the contract JSON is unchanged, so the content hash alone
+# would not distinguish mx-2 renders from mx-1 ones in the task history.
 
 _MATRIX_CONTRACT_TEXT = (
     resources.files("lunelle").joinpath("contracts/matrix_views.json").read_text("utf-8")
@@ -230,11 +237,11 @@ MATRIX_CONTRACT = json.loads(_MATRIX_CONTRACT_TEXT)
 MATRIX_TONES = tuple(MATRIX_CONTRACT["tones"])
 MATRIX_VIEWS = tuple(MATRIX_CONTRACT["views"])
 MATRIX_PROMPT_VERSION = (
-    "mx-1+" + hashlib.sha256(_MATRIX_CONTRACT_TEXT.encode()).hexdigest()[:8]
+    "mx-2+" + hashlib.sha256(_MATRIX_CONTRACT_TEXT.encode()).hexdigest()[:8]
 )
 
 MATRIX_REFERENCE_BLOCK = """INPUT AUTHORITY — do not mix these roles:
-- Image 1 is the design authority for this press-on nail set. It is the ONLY authority for nail-art colors, motifs, decorations, finish, and per-nail length and silhouette. Its layout and background are packaging only; never reproduce them.
+- Image 1 is the VIEW PLAN: this set's nails already arranged in the exact screen order they must appear in your output, left to right, with the thumb shown below its hand's finger row. It is the ONLY authority for nail-art colors, motifs, decorations, finish, per-nail length and silhouette, AND for which design goes on which finger. Copy each tile onto the finger its caption names, in the order shown. The captions, boxes, and white background are annotation only — never draw them, and never render text in the output.
 - Image 2 is the immutable base hand photo. It is authority only for hand pose, hand geometry, crop, skin tone, background, and lighting. Never copy its manicure, nail length, or nail silhouette.
 
 """
@@ -253,18 +260,68 @@ def matrix_visible_nails(view: str) -> list[str] | None:
     return list(nails) if nails else None
 
 
+def matrix_view_plan_rows(view: str) -> list[tuple[str, list[str]]] | None:
+    """Screen-order rows for a view's view-plan, or None if unknown.
+
+    Derived from the contract's `screen_slots` so the compiled view-plan and the
+    prompt can never disagree about placement — two sources of truth for nail order
+    is what produced mirrored hands in the predecessor project.
+
+    Each row is (title, [nail_id left to right]) with the thumb appended, because a
+    thumb sits below its hand's finger row rather than in line with it.
+    """
+    view_doc = MATRIX_CONTRACT["views"].get(view)
+    if not view_doc:
+        return None
+    slots = view_doc.get("screen_slots") or {}
+    rows: list[tuple[str, list[str]]] = []
+
+    both_hands = "left_upper_fingers_left_to_right" in slots
+    if both_hands:
+        for side in ("left", "right"):
+            fingers = list(slots.get(f"{side}_upper_fingers_left_to_right") or [])
+            thumb = (slots.get(f"{side}_thumb") or {}).get("nail_id")
+            if thumb:
+                fingers.append(thumb)
+            if fingers:
+                rows.append((
+                    f"{side.upper()} HAND (screen-{side} block) — "
+                    f"four fingers in screen order, then the thumb",
+                    fingers,
+                ))
+        return rows or None
+
+    # Single-hand views (p3/p5) carry one unprefixed finger row.
+    fingers = list(slots.get("upper_fingers_left_to_right") or [])
+    thumb = (slots.get("thumb") or {}).get("nail_id")
+    if thumb:
+        fingers.append(thumb)
+    if not fingers:
+        return None
+    hand = "RIGHT" if "right" in view else "LEFT"
+    return [(f"{hand} HAND — four fingers in screen order, then the thumb", fingers)]
+
+
 def build_matrix_prompt(spec: StyleSpec, identity_text: str | None,
                         tone: str, view: str, with_reference: bool) -> str:
     view_doc = MATRIX_CONTRACT["views"][view]
     identity_block = (identity_text or "").strip() or build_identity_block(spec)
     reference_block = MATRIX_REFERENCE_BLOCK if with_reference else ""
+    # The mapping note says "labeled-image mapping"; with a reference attached that
+    # labeled image is literally Image 1, so name it. Text-only renders have no
+    # Image 1 to point at and must not claim one exists.
+    plan_note = (
+        " Image 1 shows this mapping already laid out in screen order; follow the "
+        "tile order shown there rather than re-deriving it."
+        if with_reference else ""
+    )
     return f"""{reference_block}Photorealistic virtual nail try-on photo for e-commerce.
 
 {view_doc["scene"]}
 Skin: {MATRIX_CONTRACT["tones"][tone]}. Background and lighting must match the base hand photo.
 
 Visible nails this render: {", ".join(view_doc["visible_nails"])}
-{view_doc["mapping_note"]}
+{view_doc["mapping_note"]}{plan_note}
 
 NAIL SET IDENTITY (the visible nails wear this exact design — do not swap, duplicate, omit, homogenize, simplify, recolor, or invent):
 {identity_block}
