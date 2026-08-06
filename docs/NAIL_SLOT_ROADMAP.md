@@ -270,7 +270,27 @@ D1 的 REST 端点文档说多语句请求按 batch 执行（会给到真正的�
 ### 第三阶段原始计划（已完成）
 迁移 0007–0009、`assets.py`、`snapshots.py`、`tasks.py`、`publish.py`
 
-### 第四阶段 Nail Slot System
+### 第四阶段 已完成部分：Nail Slot 资产层（迁移 0010）
+
+| 项 | 实现 | 验证 |
+|---|---|---|
+| 颜色→ID 契约 | `nailslots.py:NAIL_COLORS` 十色纯通道值；**写在代码里而非素材**，改动必须走代码评审 | 单射、与肤色/布料色距离足够、`test_mapping_is_not_stored_in_the_database` |
+| 生理绑定 | `NAIL_ANATOMY`：nail-01=左拇 … nail-10=右小指，落库为 `hand`/`finger` 两列 | 每只手五指各一次；库中 120 条与代码契约逐条一致 |
+| Mask 派生 | 按精确 RGB 匹配导出，单一连通块校验、与干净底图像素对齐校验 | 16/16 对齐 `max_diff=0`；120 个色域零碎片；同输入同 digest |
+| 资产纳管 | `hand_models`（含 `revision`，底图换版不改写历史快照）+ `hand_model_slots` | 迁移在真实库演练：65 任务零丢失、integrity ok、FK 0、幂等 |
+| **alpha 极性** | `MASK_EDITABLE_IS_OPAQUE=True`——**与 OpenAI 文档相反**，实测确立 | 对照实验三组数据写进模块注释；测试锁死 |
+
+**alpha 极性这一条值得单独记**：按 OpenAI 文档（透明=可编辑）发 mask，结果甲面是唯一
+**没被改**的区域（甲面 diff 4.4、其余 4.7）；翻转后才正确（甲面 177.4、其余 5.6）。
+不带 mask 时甲面 192.1。三组数据说明 mask 是**被读取但语义相反**，不是被忽略。我最初
+从「文档参数表里没有 mask」推断它会被忽略，这个推断错了——对照实验推翻了它。
+
+**刻意未做的一步**：本地按 mask 把甲面贴回干净底图。API 返回整图重渲染，mask 外
+99.9% 的像素都有变化，但幅度极小（`<=10` 占 87%，`>30` 仅 0.3%），是编码噪声而非内容
+改动，肉眼不可辨。代价是保真从「构造保证」降为「经验观察」、QA 只能用阈值不能用恒等式、
+输出尺寸由 API 档位决定（12% 横向拉伸）。三条都记在 `TROUBLESHOOTING.md`，随时可补。
+
+### 第四阶段 剩余：接入生成管线
 新增 `lunelle/nailslots.py`（Manifest/Label/Mask 派生与校验）、
 `lunelle/handmodels.py`（纳管与预览）、迁移 0007、`scripts/import_hand_models.py`、
 `qa.py`（按 Slot 裁切）、`worker.py`（Mask inpainting）、

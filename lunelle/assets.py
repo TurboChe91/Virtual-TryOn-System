@@ -30,7 +30,11 @@ from .db import Database, transaction, utcnow
 logger = logging.getLogger(__name__)
 
 #: Asset kinds. `output` covers generated images promoted into the store.
-KINDS = ("reference", "plan", "hand_model", "correction_detail", "output", "other")
+KINDS = ("reference", "plan", "hand_model", "correction_detail", "output", "other",
+         # Nail Slot assets: the clean base photo actually sent to the provider,
+         # the colour annotation it was derived from (provenance only, never
+         # uploaded), and one derived per-nail mask.
+         "hand_base", "hand_annotation", "nail_mask")
 
 MIME_BY_EXT = {
     ".png": "image/png",
