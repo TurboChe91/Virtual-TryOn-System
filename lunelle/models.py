@@ -166,6 +166,10 @@ NON_RETRYABLE_ERROR_CODES = frozenset(
         # until the dependency itself succeeds, and running anyway would produce a
         # silently degraded asset (see migration 0008).
         "dependency_failed",
+        # What the attempt would send does not match what the task was queued to
+        # send. Retrying re-runs the same comparison against the same snapshot and
+        # gets the same answer; the fix is to re-queue so current inputs are frozen.
+        "snapshot_mismatch",
     }
 )
 
@@ -175,6 +179,8 @@ ERROR_DEPENDENCY_MISSING = "dependency_missing"
 ERROR_BUDGET_EXCEEDED = "budget_exceeded"
 #: Error code used when a task's dependency failed terminally.
 ERROR_DEPENDENCY_FAILED = "dependency_failed"
+#: Error code used when the measured request differs from the task's snapshot.
+ERROR_SNAPSHOT_MISMATCH = "snapshot_mismatch"
 
 #: Statuses from which a dependency can never become satisfiable.
 TERMINAL_FAILURE_STATUSES = (FAILED, CANCELLED)

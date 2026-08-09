@@ -444,8 +444,8 @@ async function loadStyles(){
           <span class="bg ${s.identity_text?'yes':''}">十甲身份</span>
         </div>
         <div class="cacts">
-          <button class="sm quiet" onclick="generateTypes('${s.style_id}',['grid','wearing'])">出图</button>
-          <button class="sm quiet" onclick="generateTypes('${s.style_id}',['hero'])">主图</button>
+          <button class="sm quiet" onclick="generateTypes('${s.style_id}',['grid','wearing'],'batch')">批量出图</button>
+          <button class="sm quiet" onclick="generateTypes('${s.style_id}',['hero'],'precision')">精修主图</button>
           <button class="sm quiet" onclick="generateMatrix('${s.style_id}')">试戴</button>
           <button class="sm link" onclick="manageStyle('${s.style_id}')">管理</button>
         </div>
@@ -503,6 +503,8 @@ async function manageStyle(styleId){
         <button class="sm quiet" onclick="pickUpload('${styleId}','reference')">${st.reference_image_path?'替换参考图':'上传参考图'}</button>
         <button class="sm quiet" onclick="identifyStyle('${styleId}')">识别十甲身份</button>
       </div>
+      <h3>款式图切分</h3>
+      <div id="splitPanel"><span class="muted">正在读取切图版本…</span></div>
       <h3>发布到线上试戴</h3>
       <div class="flex">
         <input id="tryonId" placeholder="试戴编号，3 位数字如 001" value="${esc(st.tryon_style_id||'')}"
@@ -519,8 +521,156 @@ async function manageStyle(styleId){
         <button class="quiet" onclick="$('#modal').style.display='none'">关闭</button>
       </div>`;
     $('#modal').style.display = 'flex';
+    loadSplitPanel(styleId, !!st.plan_image_path);
     loadReadiness(styleId);
   } catch(e){ toast(e.message, 5000); }
+}
+
+const SPLIT_STATE = {
+  auto_approved:'自动通过', waiting_review:'等待人工检查', approved:'人工通过', rejected:'已拒绝'
+};
+async function loadSplitPanel(styleId, hasPlan=true){
+  const el = $('#splitPanel'); if (!el) return;
+  if (!hasPlan){ el.innerHTML = '<span class="muted">先上传 2×5 款式图。</span>'; return; }
+  try {
+    const out = await api(`/api/styles/${styleId}/splits`);
+    if (!out.revisions.length){
+      el.innerHTML = `<button class="sm quiet" onclick="analyzeSplit('${styleId}')">自动切分</button>`;
+      return;
+    }
+    const r = out.revisions[0];
+    const needs = r.review_state === 'waiting_review';
+    el.innerHTML = `
+      <div class="flex spread">
+        <div><b>v${r.revision_number} · ${esc(r.source)}</b>
+          <span class="st ${needs?'retrying':'success'}" style="margin-left:8px">${esc(SPLIT_STATE[r.review_state]||r.review_state)}</span>
+          <span class="muted" style="margin-left:8px">confidence ${Number(r.confidence).toFixed(3)}</span>
+        </div>
+        <div class="flex">
+          <button class="sm quiet" onclick="analyzeSplit('${styleId}')">重新检测</button>
+          <button class="sm" onclick="editSplit('${styleId}','${r.crop_revision_id}')">人工调整</button>
+        </div>
+      </div>
+      ${r.gate_reasons.length?`<p style="color:var(--warn);font-size:12px">${esc(r.gate_reasons.join(' · '))}</p>`:''}
+      <div class="trio" style="grid-template-columns:1fr 1fr;margin-top:12px">
+        <div><label>检测框</label><img class="preview" src="${r.preview_url}" alt="split preview"></div>
+        <div><label>Contact Sheet</label><img class="preview" src="${r.contact_sheet_url}" alt="contact sheet"></div>
+      </div>
+      ${needs?`<div class="flex" style="margin-top:12px">
+        <button class="sm primary" onclick="reviewSplit('${styleId}','${r.crop_revision_id}',true)">确认此切分</button>
+        <button class="sm quiet" onclick="reviewSplit('${styleId}','${r.crop_revision_id}',false)">拒绝</button>
+      </div>`:''}
+      <p class="muted" style="font-size:11px;margin:10px 0 0">共 ${out.revisions.length} 个不可变版本；已排队任务不会随新版本改变。</p>`;
+  } catch(e){ el.innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`; }
+}
+async function analyzeSplit(styleId){
+  try {
+    const r = await api(`/api/styles/${styleId}/splits/analyze`, {method:'POST', body:'{}'});
+    toast(r.review_state==='auto_approved'?'自动切分已通过':'自动切分需要人工检查');
+    loadSplitPanel(styleId);
+  } catch(e){ toast('自动切分失败：' + e.message, 7000); }
+}
+async function reviewSplit(styleId, revisionId, approved){
+  try {
+    await api(`/api/splits/${revisionId}/review`, {method:'POST', body:JSON.stringify({approved})});
+    toast(approved?'切分已确认':'切分已拒绝'); loadSplitPanel(styleId);
+  } catch(e){ toast('操作失败：' + e.message, 7000); }
+}
+
+let splitEditor = null;
+async function editSplit(styleId, revisionId){
+  try {
+    const out = await api(`/api/styles/${styleId}/splits`);
+    const r = out.revisions.find(x => x.crop_revision_id === revisionId);
+    if (!r) throw new Error('切图版本不存在');
+    $('#modalBox').innerHTML = `
+      <div class="flex spread"><h2>人工调整切图</h2><span class="mono muted">v${r.revision_number}</span></div>
+      <p class="muted">点击选择框；拖动框移动，拖动右下角方块调整大小。保存会创建新版本，不覆盖 v${r.revision_number}。</p>
+      <canvas id="splitCanvas" style="width:100%;height:auto;border-radius:13px;background:#fff;touch-action:none"></canvas>
+      <div class="flex" style="margin-top:12px">
+        <select id="splitNail" style="width:150px" onchange="selectSplitNail(this.value)">
+          ${Object.keys(r.boxes).sort().map(n=>`<option>${n}</option>`).join('')}
+        </select>
+        <input id="boxL" type="number" style="width:95px" aria-label="left">
+        <input id="boxT" type="number" style="width:95px" aria-label="top">
+        <input id="boxR" type="number" style="width:95px" aria-label="right">
+        <input id="boxB" type="number" style="width:95px" aria-label="bottom">
+        <button class="sm quiet" onclick="applySplitNumbers()">应用坐标</button>
+      </div>
+      <div class="flex" style="margin-top:16px">
+        <button class="primary" onclick="saveManualSplit()">保存为人工版本</button>
+        <button class="quiet" onclick="manageStyle('${styleId}')">取消</button>
+      </div>`;
+    const image = new Image(); image.onload = () => initSplitCanvas(styleId, image, r.boxes);
+    image.onerror = () => toast('无法读取原始款式图', 6000);
+    image.src = r.source_plan_url;
+  } catch(e){ toast('打开切图编辑器失败：' + e.message, 7000); }
+}
+function initSplitCanvas(styleId, image, boxes){
+  const canvas = $('#splitCanvas');
+  canvas.width=image.naturalWidth; canvas.height=image.naturalHeight;
+  splitEditor={styleId,image,boxes:structuredClone(boxes),selected:'nail-01',drag:null};
+  canvas.addEventListener('pointerdown', splitPointerDown);
+  canvas.addEventListener('pointermove', splitPointerMove);
+  canvas.addEventListener('pointerup', ()=>{ if(splitEditor) splitEditor.drag=null; });
+  canvas.addEventListener('pointercancel', ()=>{ if(splitEditor) splitEditor.drag=null; });
+  selectSplitNail('nail-01'); drawSplitEditor();
+}
+function splitPoint(event){
+  const c=$('#splitCanvas'), r=c.getBoundingClientRect();
+  return [(event.clientX-r.left)*c.width/r.width,(event.clientY-r.top)*c.height/r.height];
+}
+function splitPointerDown(event){
+  if(!splitEditor) return; const [x,y]=splitPoint(event);
+  const ids=Object.keys(splitEditor.boxes).sort().reverse(); let chosen=null, mode='move';
+  for(const id of ids){ const b=splitEditor.boxes[id];
+    if(Math.abs(x-b[2])<18 && Math.abs(y-b[3])<18){ chosen=id; mode='resize'; break; }
+    if(x>=b[0]&&x<=b[2]&&y>=b[1]&&y<=b[3]){ chosen=id; break; }
+  }
+  if(!chosen) return; selectSplitNail(chosen);
+  splitEditor.drag={mode,start:[x,y],box:[...splitEditor.boxes[chosen]]};
+  event.currentTarget.setPointerCapture(event.pointerId);
+}
+function splitPointerMove(event){
+  if(!splitEditor||!splitEditor.drag) return; const [x,y]=splitPoint(event);
+  const d=splitEditor.drag, b=[...d.box], dx=x-d.start[0], dy=y-d.start[1];
+  if(d.mode==='move'){
+    const w=b[2]-b[0], h=b[3]-b[1]; b[0]=Math.max(0,Math.min(splitEditor.image.width-w,b[0]+dx));
+    b[1]=Math.max(0,Math.min(splitEditor.image.height-h,b[1]+dy)); b[2]=b[0]+w; b[3]=b[1]+h;
+  } else { b[2]=Math.max(b[0]+4,Math.min(splitEditor.image.width,b[2]+dx));
+           b[3]=Math.max(b[1]+4,Math.min(splitEditor.image.height,b[3]+dy)); }
+  splitEditor.boxes[splitEditor.selected]=b.map(Math.round); updateSplitNumbers(); drawSplitEditor();
+}
+function selectSplitNail(id){
+  if(!splitEditor) return; splitEditor.selected=id; const s=$('#splitNail'); if(s)s.value=id;
+  updateSplitNumbers(); drawSplitEditor();
+}
+function updateSplitNumbers(){
+  if(!splitEditor) return; const b=splitEditor.boxes[splitEditor.selected];
+  ['#boxL','#boxT','#boxR','#boxB'].forEach((id,i)=>{ const el=$(id); if(el)el.value=b[i]; });
+}
+function applySplitNumbers(){
+  if(!splitEditor)return; const b=['#boxL','#boxT','#boxR','#boxB'].map(id=>Number($(id).value));
+  if(!(b[0]>=0&&b[1]>=0&&b[2]>b[0]&&b[3]>b[1]&&b[2]<=splitEditor.image.width&&b[3]<=splitEditor.image.height)){
+    toast('坐标超出图片或宽高无效'); return;
+  }
+  splitEditor.boxes[splitEditor.selected]=b.map(Math.round); drawSplitEditor();
+}
+function drawSplitEditor(){
+  if(!splitEditor)return; const c=$('#splitCanvas'), ctx=c.getContext('2d');
+  ctx.drawImage(splitEditor.image,0,0); ctx.font=`${Math.max(13,c.width/42)}px sans-serif`;
+  for(const [id,b] of Object.entries(splitEditor.boxes)){
+    const on=id===splitEditor.selected; ctx.strokeStyle=on?'#9f3f55':'#0091ff'; ctx.lineWidth=on?5:3;
+    ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]); ctx.fillStyle=ctx.strokeStyle;
+    ctx.fillText(id,b[0]+5,b[1]+20); ctx.fillRect(b[2]-8,b[3]-8,16,16);
+  }
+}
+async function saveManualSplit(){
+  if(!splitEditor)return; const body={boxes:Object.keys(splitEditor.boxes).sort().map(n=>({nail_id:n,bbox:splitEditor.boxes[n]}))};
+  try {
+    await api(`/api/styles/${splitEditor.styleId}/splits/manual`, {method:'POST',body:JSON.stringify(body)});
+    const styleId=splitEditor.styleId; splitEditor=null; toast('人工切图版本已保存并通过'); manageStyle(styleId);
+  } catch(e){ toast('保存失败：'+e.message,7000); }
 }
 async function loadReadiness(styleId){
   try {
@@ -589,7 +739,7 @@ async function generateMatrix(styleId){
   try {
     const gen = await api(`/api/styles/${styleId}/matrix`, {method:'POST',
       // 回传上限金额作为授权：上限若已变动，服务端会拒绝并要求重新确认。
-      body: JSON.stringify({confirm_max_usd: est.confirm_max_usd})});
+      body: JSON.stringify({confirm_max_usd: est.confirm_max_usd, mode:'batch'})});
     toast(`试戴矩阵已排队 ${gen.created.length} 格` +
       (gen.skipped.length ? `，${gen.skipped.length} 格已有成品` : ''));
     loadTasks(); loadMetrics(); loadBudget();
@@ -608,10 +758,10 @@ async function loadBudget(){
   } catch(e){ el.textContent = ''; }
 }
 
-async function generateTypes(styleId, types){
+async function generateTypes(styleId, types, mode=null){
   try {
     const gen = await api(`/api/styles/${styleId}/generate`,
-      {method:'POST', body: JSON.stringify({output_types: types})});
+      {method:'POST', body: JSON.stringify({output_types: types, mode})});
     toast(`已排队 ${gen.created.length} 个任务` +
       (gen.skipped.length ? `，${gen.skipped.length} 个已有成品未重复生成` : ''));
     loadTasks(); loadMetrics();
@@ -703,12 +853,19 @@ async function showTask(id){
   try {
     const t = await api('/api/tasks/' + id);
     const ver = t.metadata && t.metadata.version ? t.metadata.version : 1;
+    const mode = t.metadata && t.metadata.generation_mode ? t.metadata.generation_mode : 'batch';
     const qa = t.status === 'success' ? renderReviewPanel(t) : '';
     const img = t.status==='success' ? `<img class="preview" src="/api/tasks/${id}/image">` : '';
+    const nailDetails = t.status==='success' && (t.output_type==='hero'||t.output_type==='matrix_cell') ? `
+      <label>高清 Detail Reference（可多选；自动取本候选使用的切图版本）</label>
+      <select id="correctionNails" multiple size="4" style="max-width:280px">
+        ${Array.from({length:10},(_,i)=>`<option>nail-${String(i+1).padStart(2,'0')}</option>`).join('')}
+      </select>` : '';
     const correctForm = t.status==='success' ? `
       <h3>提交修正（将创建 v${ver+1}，锁定本版为底图的局部编辑）</h3>
       <p class="muted" style="font-size:12.5px; margin:0 0 8px">只点名要修的甲位；给全图计数锁（如「哥特蛋白石全图恰好 2 个」）；结尾写明其余甲位完全不动。可附放大参考图。</p>
       <textarea id="correctionText" placeholder="只交换右手第 1、3 槽的图案；太阳纹全图恰好一个；其余九个甲片完全不动。"></textarea>
+      ${nailDetails}
       <div class="flex" style="margin-top:10px">
         <input id="correctionFile" type="file" accept="image/png,image/jpeg,image/webp" style="width:auto">
         <button class="sm" onclick="correctTask('${t.task_id}')">提交修正</button>
@@ -716,7 +873,7 @@ async function showTask(id){
     $('#modalBox').innerHTML = `
       <div class="flex spread">
         <h2>${esc(t.sku)} · ${esc(TYPE_LABEL[t.output_type]||t.output_type)} · v${ver}</h2>
-        <span class="st ${esc(t.status)}">${esc(ST_LABEL[t.status]||t.status)}</span>
+        <span class="st ${esc(t.status)}">${esc(ST_LABEL[t.status]||t.status)} · ${esc(mode)}</span>
       </div>
       ${t.metadata && t.metadata.correction_of ? `<p class="mono muted" style="font-size:11.5px; margin:6px 0 0">修正自 ${esc(t.metadata.correction_of)}</p>` : ''}
       ${t.error_message?`<p style="color:var(--err)">${esc(t.error_code)}：${esc(t.error_message)}</p>`:''}
@@ -732,6 +889,8 @@ async function correctTask(id){
   if (text.length < 4) { toast('请先写明修正内容'); return; }
   const fd = new FormData();
   fd.append('correction', text);
+  const nailSelect = $('#correctionNails');
+  if (nailSelect) fd.append('detail_nails', [...nailSelect.selectedOptions].map(o=>o.value).join(','));
   if ($('#correctionFile').files.length) fd.append('file', $('#correctionFile').files[0]);
   const headers = token() ? {'X-Admin-Token': token()} : {};
   try {

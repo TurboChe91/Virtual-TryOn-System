@@ -38,7 +38,13 @@ from .db import Database, transaction, utcnow
 
 logger = logging.getLogger(__name__)
 
-SNAPSHOT_VERSION = 1
+#: 2 adds what makes a snapshot executable rather than merely descriptive: inputs
+#: tagged by role and resolvable by digest, a channel fingerprint to compare against
+#: at execution time, and explicit `deferred`/`unresolved` lists. Version 1
+#: snapshots are readable but NOT executable — their `input_assets` say `kind`
+#: rather than `role`, so which image was Image 1 is not recoverable from them. The
+#: worker refuses them instead of guessing (see worker._load_execution_plan).
+SNAPSHOT_VERSION = 2
 
 #: Keys excluded from the fingerprint: identity, bookkeeping, and anything that
 #: varies between two runs of the same inputs.
@@ -81,6 +87,9 @@ def build_snapshot(
     api_profile: dict | None,
     input_assets: list[dict],
     extra: dict | None = None,
+    channel_fingerprint: str = "",
+    deferred_inputs: list[dict] | None = None,
+    unresolved_inputs: list[dict] | None = None,
 ) -> dict:
     """Assemble the frozen input record. Pure — no I/O, no clock."""
     snapshot = {
@@ -110,10 +119,27 @@ def build_snapshot(
             # a snapshot: snapshots are long-lived, exported, and read by anyone
             # debugging a task.
             "api_profile": api_profile,
+            # One value covering profile id + base URL + key. A profile row is
+            # edited in place, so the same profile_id can point at a different
+            # endpoint with a different key tomorrow; the worker compares this and
+            # blocks rather than sending a queued task down a channel its snapshot
+            # never described.
+            "channel_fingerprint": channel_fingerprint,
         },
         "size": [size[0], size[1]],
-        # Inputs by content digest, so an overwritten file cannot change history.
+        # Inputs by ROLE and content digest, in the order the provider receives
+        # them. Role rather than position: which image is the view-plan and which
+        # is the base hand used to be implicit in list order, and the `kind` field
+        # said 'hand_model' for a plan and 'reference' for everything.
         "input_assets": input_assets,
+        # Inputs that cannot exist yet — a wearing shot's grid is generated later in
+        # the same batch. Declared, not guessed: claiming a digest for a file that
+        # does not exist would make the snapshot a prediction.
+        "deferred_inputs": deferred_inputs or [],
+        # Inputs that were expected and absent at queue time. The task is queued
+        # anyway and the worker blocks it as dependency_missing without a provider
+        # call, which keeps the failure visible in the task list.
+        "unresolved_inputs": unresolved_inputs or [],
     }
     if extra:
         snapshot["extra"] = dict(sorted(extra.items()))
@@ -125,24 +151,49 @@ def profile_snapshot(row) -> dict | None:
     if row is None:
         return None
     api_key = row["api_key"] if "api_key" in row.keys() else ""
+    base_url = row["base_url"] or ""
     return {
         "profile_id": row["profile_id"],
         "name": row["name"],
-        "base_url": row["base_url"],
+        "base_url": base_url,
         "model": row["model"],
         "reference_mode": row["reference_mode"],
         # sha256 prefix: enough to tell two keys apart, useless as a credential.
         "key_fingerprint": hashlib.sha256(api_key.encode()).hexdigest()[:8],
+        # The base URL is stored in the clear above for debugging, and fingerprinted
+        # here so the execution-time comparison is one uniform check across all
+        # three channel fields rather than a string compare on one of them.
+        "base_url_fingerprint": hashlib.sha256(base_url.encode()).hexdigest()[:8],
     }
 
 
 def store_snapshot_locked(conn, task_id: str, snapshot: dict,
-                          fingerprint: str) -> None:
+                          fingerprint: str, *, replace: bool = False) -> None:
     """Insert the snapshot inside the caller's transaction.
 
     Same transaction as the task insert on purpose: a task must never exist
     without the record of what it was built from.
+
+    `replace=True` is for explicit re-queue only (see TaskService.refreeze_snapshot).
+    A task blocked for a missing asset froze "this input was absent", and the worker
+    now executes only from the snapshot, so without a re-freeze the operator could
+    never recover it by uploading the asset. It is deliberately not the default:
+    overwriting a snapshot while a task is claimable would destroy the immutability
+    the worker depends on.
     """
+    if replace:
+        conn.execute(
+            "INSERT INTO task_snapshots (task_id, input_fingerprint, snapshot_version,"
+            " snapshot_json, created_at) VALUES (?,?,?,?,?)"
+            " ON CONFLICT(task_id) DO UPDATE SET"
+            "   input_fingerprint = excluded.input_fingerprint,"
+            "   snapshot_version = excluded.snapshot_version,"
+            "   snapshot_json = excluded.snapshot_json,"
+            "   created_at = excluded.created_at",
+            (task_id, fingerprint, SNAPSHOT_VERSION,
+             canonical_json(snapshot), utcnow()),
+        )
+        return
     conn.execute(
         "INSERT INTO task_snapshots (task_id, input_fingerprint, snapshot_version,"
         " snapshot_json, created_at) VALUES (?,?,?,?,?)",
@@ -164,7 +215,11 @@ def get_snapshot(db: Database, task_id: str) -> dict | None:
 
 def record_execution(db: Database, task_id: str, attempt_no: int, *,
                      resolved_assets: list[dict], prompt_sent: str,
-                     model: str, provider: str) -> None:
+                     model: str, provider: str,
+                     build: dict | None = None,
+                     request: dict | None = None,
+                     snapshot_fingerprint: str | None = None,
+                     matches_snapshot: bool | None = None) -> None:
     """Record what was ACTUALLY sent, as distinct from what was planned.
 
     These differ in practice: a reference can be missing at execution time and the
@@ -172,24 +227,105 @@ def record_execution(db: Database, task_id: str, attempt_no: int, *,
     provider are not what the snapshot planned. Auditing a bad image needs the
     former; reproducing a task needs the latter. Keeping both, separately, is the
     only way to have each.
+
+    `build` is the identity of the code that ran (see lunelle/build.py). Without it
+    a run by a stale process is indistinguishable from a correct one, which is how
+    four cells were rendered on 2026-08-06 against code that had not been loaded.
+    It is promoted to columns as well as kept in the JSON so "every execution on
+    this build" is a query rather than a scan.
+
+    `request` is the measured description of what is being sent: every image's
+    sha256 and role, the prompt hash, the requested size, the model and the channel
+    fingerprint (see inputs.request_manifest). It is written BEFORE the call, so a
+    crash mid-flight still leaves a record of what went out.
+
+    `matches_snapshot` is the verdict of comparing the two. It replaces
+    `prompt_differs_from_snapshot`, which was declared but never filled by any
+    caller and so read as None on every row ever written.
     """
-    payload = {
+    payload: dict = {
         "resolved_assets": resolved_assets,
         "prompt_sha256": hashlib.sha256(prompt_sent.encode()).hexdigest(),
-        "prompt_differs_from_snapshot": None,  # filled by the caller if known
         "model": model,
         "provider": provider,
     }
+    if build:
+        payload["build"] = build
+    if request:
+        payload["request"] = request
+    if snapshot_fingerprint:
+        payload["snapshot_fingerprint"] = snapshot_fingerprint
+    if matches_snapshot is not None:
+        payload["matches_snapshot"] = matches_snapshot
     conn = db.conn()
     with transaction(conn):
         conn.execute(
             "INSERT INTO task_executions (task_id, attempt_no, execution_json,"
-            " created_at) VALUES (?,?,?,?)"
+            " created_at, build_id, runtime_tree_sha, git_sha, git_dirty,"
+            " diff_sha256, dependency_sha256, process_id, worker_instance,"
+            " runtime_drift_detected, prompt_sha256, size_requested,"
+            " channel_fingerprint, snapshot_fingerprint, matches_snapshot,"
+            " input_digests)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(task_id, attempt_no) DO UPDATE SET"
             "   execution_json = excluded.execution_json,"
-            "   created_at = excluded.created_at",
-            (task_id, attempt_no, canonical_json(payload), utcnow()),
+            "   created_at = excluded.created_at,"
+            "   build_id = excluded.build_id,"
+            "   runtime_tree_sha = excluded.runtime_tree_sha,"
+            "   git_sha = excluded.git_sha,"
+            "   git_dirty = excluded.git_dirty,"
+            "   diff_sha256 = excluded.diff_sha256,"
+            "   dependency_sha256 = excluded.dependency_sha256,"
+            "   process_id = excluded.process_id,"
+            "   worker_instance = excluded.worker_instance,"
+            "   runtime_drift_detected = excluded.runtime_drift_detected,"
+            "   prompt_sha256 = excluded.prompt_sha256,"
+            "   size_requested = excluded.size_requested,"
+            "   channel_fingerprint = excluded.channel_fingerprint,"
+            "   snapshot_fingerprint = excluded.snapshot_fingerprint,"
+            "   matches_snapshot = excluded.matches_snapshot,"
+            "   input_digests = excluded.input_digests",
+            (task_id, attempt_no, canonical_json(payload), utcnow(),
+             (build or {}).get("build_id"),
+             (build or {}).get("runtime_tree_sha256"),
+             (build or {}).get("git_sha"),
+             _as_int_flag((build or {}).get("git_dirty")),
+             (build or {}).get("diff_sha256"),
+             (build or {}).get("dependency_sha256"),
+             (build or {}).get("process_id"),
+             (build or {}).get("worker_instance"),
+             _as_int_flag((build or {}).get("runtime_drift_detected")),
+             payload["prompt_sha256"],
+             _size_text((request or {}).get("size_requested")),
+             (request or {}).get("channel_fingerprint"),
+             snapshot_fingerprint,
+             _as_int_flag(matches_snapshot),
+             _input_digest_text((request or {}).get("input_images"))),
         )
+
+
+def _as_int_flag(value) -> int | None:
+    """Booleans as 0/1 for SQLite, preserving None as "not recorded"."""
+    return None if value is None else (1 if value else 0)
+
+
+def _size_text(size) -> str | None:
+    """"2224x1664" — greppable, and comparable without parsing JSON."""
+    if not size or len(size) != 2:
+        return None
+    return f"{size[0]}x{size[1]}"
+
+
+def _input_digest_text(images) -> str | None:
+    """"role:digest12 role:digest12" in send order.
+
+    A flat column so "which cells were sent this exact view-plan" is a LIKE away.
+    Roles are included because a digest alone does not say what it was used AS, and
+    that conflation is what let a plan be sent where a view-plan was promised.
+    """
+    if not images:
+        return None
+    return " ".join(f"{img['role']}:{img['sha256'][:12]}" for img in images)
 
 
 def get_executions(db: Database, task_id: str) -> list[dict]:

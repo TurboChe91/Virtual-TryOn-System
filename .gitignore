@@ -17,6 +17,8 @@ venv/
 data/
 logs/
 outputs/
+# Local visualizations generated during analysis; not application assets.
+output/
 uploads/
 exports/
 backups/

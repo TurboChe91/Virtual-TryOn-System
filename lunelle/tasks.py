@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .config import Config
 from .db import Database, transaction, utcnow
-from .geometry import size_from_reference
+from .geometry import legal_size_for_ratio
 from .models import (
     CANCELLED,
     CLAIMABLE_STATUSES,
@@ -25,6 +25,7 @@ from .models import (
     MANUAL_RETRY_STATUSES,
     OUTPUT_GRID,
     OUTPUT_HERO,
+    OUTPUT_MATRIX_CELL,
     OUTPUT_WEARING,
     PENDING,
     QA_DONE,
@@ -49,6 +50,7 @@ from .models import (
     new_task_id,
 )
 from .prompts import (
+    HERO_PROMPT_VERSION,
     MATRIX_PROMPT_VERSION,
     MATRIX_TONES,
     MATRIX_VIEWS,
@@ -56,6 +58,8 @@ from .prompts import (
     build_correction_prompt,
     build_matrix_prompt,
     build_prompt_bundle,
+    hero_view_plan_spec,
+    matrix_view_plan_spec,
     prompt_for_output_type,
     prompt_version_for,
 )
@@ -65,6 +69,7 @@ from .snapshots import (
     compute_fingerprint,
     config_fingerprint_fields,
     contract_hashes_for,
+    get_snapshot,
     profile_snapshot,
     store_snapshot_locked,
 )
@@ -72,7 +77,7 @@ from .snapshots import (
 logger = logging.getLogger(__name__)
 
 
-from .assets import describe_inputs_locked  # noqa: E402
+from .assets import digest_of_file, store_bytes, store_file  # noqa: E402
 from .budget import (  # noqa: E402
     check_can_queue_locked,
     estimate_plan,
@@ -85,6 +90,17 @@ from .errors import (  # noqa: E402  (re-exported for callers)
     CostConfirmationRequired,
     NotFoundError,
 )
+from .inputs import (  # noqa: E402
+    AUTHORITY_ROLES,
+    FrozenInput,
+    channel_fingerprint,
+    freeze_file_locked,
+)
+from .inputs import freeze as freeze_input  # noqa: E402
+from .nailslots import NAIL_ANATOMY  # noqa: E402
+from .planview import PlanError, build_spatial_view_plan  # noqa: E402
+from .policy import resolve_policy  # noqa: E402
+from .splits import SplitService  # noqa: E402
 
 CORRECTION_BUDGET = 5  # authorized versions per style+output_type (v1..v5), per SOP
 
@@ -241,21 +257,28 @@ class TaskService:
     def _snapshot_for(
         self, conn, *, style: dict, output_type: str, prompt: str,
         negative_prompt: str, prompt_version: str, provider: str, model: str,
-        size: tuple[int, int], profile_row, input_paths: list[Path],
-        asset_kind: str, extra: dict | None = None,
+        size: tuple[int, int], profile_row, extra: dict | None = None,
+        frozen_inputs: list[FrozenInput] | None = None,
+        deferred_inputs: list[dict] | None = None,
+        unresolved_inputs: list[dict] | None = None,
     ) -> tuple[dict, str]:
         """Build (snapshot, input_fingerprint) for one task.
 
-        What can be frozen at creation time is frozen here. Inputs that only exist
-        at execution time — the grid a wearing shot will use is generated later in
-        the same batch — are recorded as intent flags in `extra`, and the actual
-        digests land in task_executions. Claiming a digest for a file that does not
-        exist yet would make the snapshot a guess.
+        Inputs arrive already frozen — registered in the content-addressed store and
+        tagged with the role they serve — because freezing needs image work and its
+        own store transactions, which cannot happen inside the caller's write
+        transaction. This function is now purely assembly.
+
+        Three lists, three different facts, deliberately not merged:
+          frozen      the bytes this task will send, by role and digest
+          deferred    an input that cannot exist yet (a wearing shot's grid)
+          unresolved  an input that was expected and absent — the task is queued and
+                      the worker blocks it without a provider call
         """
-        assets_described = describe_inputs_locked(conn, input_paths, kind=asset_kind)
         merged_extra = dict(config_fingerprint_fields(self.config))
         if extra:
             merged_extra.update(extra)
+        assets_described = [item.as_dict() for item in (frozen_inputs or [])]
         snapshot = build_snapshot(
             style=style,
             spec={k: v for k, v in style["spec"].items() if not k.startswith("_")},
@@ -272,6 +295,9 @@ class TaskService:
             api_profile=profile_snapshot(profile_row),
             input_assets=assets_described,
             extra=merged_extra,
+            channel_fingerprint=channel_fingerprint(profile_snapshot(profile_row)),
+            deferred_inputs=deferred_inputs,
+            unresolved_inputs=unresolved_inputs,
         )
         return snapshot, compute_fingerprint(snapshot)
 
@@ -281,6 +307,114 @@ class TaskService:
         if output_type == OUTPUT_HERO:
             return self.config.hero_size
         return self.config.wearing_size
+
+    def _refreeze_locked(
+        self, conn, task_id: str, *, style: dict, output_type: str, prompt: str,
+        negative_prompt: str, prompt_version: str, provider: str, model: str,
+        frozen: tuple[list[FrozenInput], list[dict], list[dict], tuple[int, int]],
+        extra: dict,
+    ) -> None:
+        """Re-store a re-queued task's snapshot inside the caller's transaction.
+
+        The freeze itself already happened outside this transaction (it copies files
+        into the store and opens its own transactions); this only replaces the record.
+        """
+        frozen_inputs, deferred, unresolved, size = frozen
+        _provider, model_now, _price, profile_row = self._generation_channel_row()
+        snapshot, fingerprint = self._snapshot_for(
+            conn, style=style, output_type=output_type, prompt=prompt,
+            negative_prompt=negative_prompt, prompt_version=prompt_version,
+            provider=provider, model=model, size=size, profile_row=profile_row,
+            frozen_inputs=frozen_inputs, deferred_inputs=deferred,
+            unresolved_inputs=unresolved, extra=extra,
+        )
+        store_snapshot_locked(conn, task_id, snapshot, fingerprint, replace=True)
+        conn.execute(
+            "UPDATE tasks SET input_fingerprint = ?, updated_at = ? WHERE task_id = ?",
+            (fingerprint, utcnow(), task_id),
+        )
+
+    def refreeze_snapshot(self, task_id: str) -> str | None:
+        """Re-plan a not-yet-claimable task against current inputs.
+
+        Called only from explicit re-queue paths (manual retry, re-queueing a failed
+        task). The worker executes strictly from the snapshot, so a task blocked for a
+        missing asset would otherwise stay blocked after the operator uploads it: its
+        snapshot records that the input was absent, and that record is correct about
+        the moment it was taken.
+
+        Safe because it runs while the task is NOT claimable — a failed or cancelled
+        task, before the transition back to pending. The snapshot is still immutable
+        across the window that matters: from claimable to executed.
+
+        The previous plan is not silently lost. Each attempt's execution row carries
+        its own `snapshot_fingerprint`, so the history shows attempt 1 ran against one
+        plan and attempt 2 against another.
+        """
+        task = self.get_task(task_id, with_details=False)
+        if task["output_type"] not in (OUTPUT_GRID, OUTPUT_HERO, OUTPUT_WEARING,
+                                       OUTPUT_MATRIX_CELL):
+            return None
+        if task["metadata"].get("correction_of"):
+            # A correction's base is a specific successful candidate's image, which
+            # does not change; re-freezing could only substitute a different base.
+            return None
+        style = self.get_style(task["style_id"])
+        frozen, deferred, unresolved, size = self._freeze_inputs_for(
+            style, task["output_type"], task["metadata"])
+        provider_name, model, _price, profile_row = self._generation_channel_row()
+        conn = self.db.conn()
+        with transaction(conn):
+            snapshot, fingerprint = self._snapshot_for(
+                conn, style=style, output_type=task["output_type"],
+                prompt=task["prompt"], negative_prompt=task["negative_prompt"],
+                prompt_version=task["prompt_version"],
+                provider=provider_name, model=model, size=size,
+                profile_row=profile_row, frozen_inputs=frozen,
+                deferred_inputs=deferred, unresolved_inputs=unresolved,
+                extra=self._refreeze_extra(task),
+            )
+            store_snapshot_locked(conn, task_id, snapshot, fingerprint, replace=True)
+            conn.execute(
+                "UPDATE tasks SET input_fingerprint = ?, updated_at = ? WHERE task_id = ?",
+                (fingerprint, utcnow(), task_id),
+            )
+        return fingerprint
+
+    @staticmethod
+    def _refreeze_extra(task: dict) -> dict:
+        """The `extra` fields a re-frozen snapshot keeps from the task's metadata."""
+        metadata = task["metadata"]
+        if task["output_type"] == OUTPUT_MATRIX_CELL:
+            return {
+                "tone": metadata.get("tone", ""),
+                "view": metadata.get("view", ""),
+                "generation_policy": metadata.get("generation_policy", {}),
+            }
+        return {
+            "pending_reference_intent": sorted(
+                key for key in ("use_reference", "use_hero_reference",
+                                "use_style_reference")
+                if metadata.get(key)
+            ),
+            "waits_for_grid": bool(task.get("wait_for_task_id")),
+            "generation_policy": metadata.get("generation_policy", {}),
+        }
+
+    def _size_for_correction(self, source: dict) -> tuple[int, int]:
+        """A correction must request the size its source did.
+
+        `_size_for_output` returns the configured wearing size for a matrix cell,
+        which is not the cell's size — a cell derives its size from the base hand's
+        aspect ratio. Correcting a cell at the configured size would stretch the very
+        hand the correction is meant to preserve, so the source's frozen size wins.
+        """
+        record = get_snapshot(self.db, source["task_id"])
+        if record:
+            size = record["snapshot"].get("size")
+            if isinstance(size, list) and len(size) == 2:
+                return int(size[0]), int(size[1])
+        return self._size_for_output(source["output_type"])
 
     @staticmethod
     def idempotency_key(style_id: str, output_type: str, prompt_version: str, prompt: str, nonce: str) -> str:
@@ -292,6 +426,7 @@ class TaskService:
         self, style_id: str, output_types: list[str], *, force: bool = False,
         note: str = "", root_override: str | None = None,
         parent_task_id: str | None = None, lineage_reason: str | None = None,
+        mode: str | None = None,
     ) -> GenerationPlan:
         """Queue operator-requested generations.
 
@@ -318,6 +453,31 @@ class TaskService:
         reused: list[dict] = []
         skipped: list[dict] = []
 
+        # Freeze BEFORE the write transaction: this copies files into the store and
+        # opens its own transactions, and SQLite cannot nest BEGIN IMMEDIATE. The
+        # reference intent depends only on config and the style row, both read above.
+        use_refs = self.config.reference_mode != "off"
+        policies = {
+            output_type: resolve_policy(mode, output_type)
+            for output_type in set(output_types)
+        }
+        metadata_intent = {
+            output_type: {
+                "use_style_reference": (output_type == OUTPUT_GRID and use_refs
+                                        and bool(style.get("reference_image_path"))),
+                "use_hero_reference": output_type == OUTPUT_HERO and use_refs,
+                "use_reference": output_type == OUTPUT_WEARING and use_refs,
+                "generation_mode": policies[output_type].mode,
+                "generation_policy": policies[output_type].as_dict(),
+            }
+            for output_type in set(output_types)
+        }
+        frozen_by_type = {
+            output_type: self._freeze_inputs_for(style, output_type,
+                                                 metadata_intent[output_type])
+            for output_type in set(output_types)
+        }
+
         order = {OUTPUT_GRID: 0, OUTPUT_HERO: 1, OUTPUT_WEARING: 2}
         with transaction(conn):
             conn.execute(
@@ -329,7 +489,12 @@ class TaskService:
             for output_type in sorted(output_types, key=lambda t: order.get(t, 3)):
                 prompt = prompt_for_output_type(bundle, output_type)
                 version = prompt_version_for(output_type)
-                nonce = batch_id if force else ""
+                policy = policies[output_type]
+                # Keep the historical Batch key stable so deploying policy
+                # metadata does not re-queue every successful Grid/Wearing task.
+                nonce = batch_id if force else (
+                    "" if policy.mode == "batch" else "mode:precision"
+                )
                 key = self.idempotency_key(
                     style_id, output_type, version, prompt, nonce
                 )
@@ -350,6 +515,24 @@ class TaskService:
                                         "reason": "already succeeded; use force=true to regenerate"})
                         continue
                     # failed / cancelled -> safe re-queue of the same task, fresh budget
+                    # Re-plan against current inputs: a task blocked for a missing
+                    # asset froze "absent", and the worker executes only from the
+                    # snapshot, so re-queueing without this would block again.
+                    self._refreeze_locked(
+                        conn, existing["task_id"], style=style, output_type=output_type,
+                        prompt=prompt, negative_prompt=bundle.negative_prompt,
+                        prompt_version=version, provider=provider_name, model=model,
+                        frozen=frozen_by_type[output_type],
+                        extra={
+                            "pending_reference_intent": sorted(
+                                key for key in ("use_reference", "use_hero_reference",
+                                                "use_style_reference")
+                                if metadata_intent[output_type].get(key)
+                            ),
+                            "waits_for_grid": bool(existing["wait_for_task_id"]),
+                            "generation_policy": policy.as_dict(),
+                        },
+                    )
                     self._transition_locked(conn, existing["task_id"], status, PENDING,
                                             error_code=None, error_message=None,
                                             next_attempt_at=None, retry_count=0)
@@ -362,6 +545,8 @@ class TaskService:
                 task_id = new_task_id()
                 wait_for = None
                 metadata: dict = {"note": note} if note else {}
+                metadata["generation_mode"] = policy.mode
+                metadata["generation_policy"] = policy.as_dict()
                 if profile_name:
                     metadata["api_profile"] = profile_name
                 if output_type == OUTPUT_WEARING and self.config.reference_mode != "off":
@@ -370,10 +555,6 @@ class TaskService:
                         wait_for = grid_task_id_this_round
                 if output_type == OUTPUT_HERO and self.config.reference_mode != "off":
                     metadata["use_hero_reference"] = True
-                    # The plan upload is Image 1 when present; otherwise the hero
-                    # rides on the latest grid, so gate it on a grid queued now.
-                    if not style.get("plan_image_path") and grid_task_id_this_round:
-                        wait_for = grid_task_id_this_round
                 if (
                     output_type == OUTPUT_GRID
                     and self.config.reference_mode != "off"
@@ -384,25 +565,19 @@ class TaskService:
                 # An operator-requested task is its own lineage root, and gets a
                 # fresh shared allowance for whatever automatic work follows.
                 root_task_id = root_override or task_id
-                # Freeze the inputs. Only assets that exist NOW get a digest; the
-                # grid a wearing shot will use does not exist yet, so its intent is
-                # recorded and the actual digest lands in task_executions.
-                input_paths: list[Path] = []
-                if metadata.get("use_style_reference"):
-                    candidate = Path(metadata.get("style_reference_path", ""))
-                    if candidate.is_file():
-                        input_paths.append(candidate)
-                if output_type == OUTPUT_HERO and style.get("plan_image_path"):
-                    plan_path = Path(style["plan_image_path"])
-                    if plan_path.is_file():
-                        input_paths.append(plan_path)
+                # Freeze what exists now, by role. A wearing shot's grid is
+                # generated later in this same batch, so it is DECLARED as deferred
+                # rather than given a digest — a digest for a file that does not
+                # exist would make the snapshot a prediction.
+                frozen, deferred, unresolved, size = frozen_by_type[output_type]
                 snapshot, fingerprint = self._snapshot_for(
                     conn, style=style, output_type=output_type, prompt=prompt,
                     negative_prompt=bundle.negative_prompt, prompt_version=version,
                     provider=provider_name, model=model,
-                    size=self._size_for_output(output_type),
-                    profile_row=profile_row, input_paths=input_paths,
-                    asset_kind="plan" if output_type == OUTPUT_HERO else "reference",
+                    size=size,
+                    profile_row=profile_row,
+                    frozen_inputs=frozen, deferred_inputs=deferred,
+                    unresolved_inputs=unresolved,
                     extra={
                         "pending_reference_intent": sorted(
                             k for k in ("use_reference", "use_hero_reference",
@@ -410,6 +585,7 @@ class TaskService:
                             if metadata.get(k)
                         ),
                         "waits_for_grid": bool(wait_for),
+                        "generation_policy": policy.as_dict(),
                     },
                 )
                 depth = self._depth_after(conn, parent_task_id)
@@ -469,20 +645,20 @@ class TaskService:
         return GenerationPlan(batch_id=batch_id, created=created, reused=reused, skipped=skipped)
 
     def estimate_matrix(self, style_id: str, *, tones: list[str] | None = None,
-                        views: list[str] | None = None, force: bool = False) -> dict:
+                        views: list[str] | None = None, force: bool = False,
+                        mode: str = "batch") -> dict:
         """Price a matrix batch WITHOUT queueing anything.
 
         Counts only cells that would actually be created: re-running a matrix
         where most cells already succeeded should quote the incremental cost, not
         the full 16, or the operator learns to ignore the number.
         """
-        from .models import OUTPUT_MATRIX_CELL
-
         style = self.get_style(style_id)
         spec = self.spec_for(style)
         tones, views = self._matrix_axes(tones, views)
         _, _, price, _ = self._generation_channel()
         use_refs = self.config.reference_mode != "off"
+        policy = resolve_policy(mode, OUTPUT_MATRIX_CELL)
 
         conn = self.db.conn()
         would_create = 0
@@ -495,7 +671,9 @@ class TaskService:
                 )
                 key = self.idempotency_key(
                     style_id, OUTPUT_MATRIX_CELL, MATRIX_PROMPT_VERSION, prompt,
-                    "FORCE" if force else "",
+                    "FORCE" if force else (
+                        "" if policy.mode == "batch" else "mode:precision"
+                    ),
                 )
                 existing = conn.execute(
                     "SELECT status FROM tasks WHERE idempotency_key = ?", (key,)
@@ -518,6 +696,7 @@ class TaskService:
             "cells_in_progress": in_progress,
             "tones": tones,
             "views": views,
+            "generation_policy": policy.as_dict(),
         })
         estimate["budget"] = spend_snapshot(self.db, self.config).as_dict()
         return estimate
@@ -532,22 +711,235 @@ class TaskService:
         ).fetchone()
         return (int(row["lineage_depth"]) + 1) if row is not None else 1
 
-    def _matrix_input_paths(self, conn, style: dict, tone: str, view: str) -> list[Path]:
-        """Design authority then hand model, in the order the provider receives
-        them (Image 1 = design, Image 2 = base hand).
+    def _freeze_inputs_for(
+        self, style: dict, output_type: str, metadata: dict, *, memo: dict | None = None,
+    ) -> tuple[list[FrozenInput], list[dict], list[dict], tuple[int, int]]:
+        """(frozen, deferred, unresolved, size) for one task, from current state.
 
-        Only an uploaded plan counts as the design authority here. The worker
-        refuses a cell whose authority would be a generated grid, so accepting one
-        at queue time would freeze an input into the snapshot that never gets used.
+        One implementation shared by queueing and re-queueing, so a re-queued task
+        freezes by exactly the same rules as a fresh one. Runs outside any write
+        transaction: it compiles images and writes to the store.
         """
-        paths: list[Path] = []
+        memo = memo if memo is not None else {}
+        frozen: list[FrozenInput] = []
+        deferred: list[dict] = []
+        unresolved: list[dict] = []
+
+        if output_type == OUTPUT_MATRIX_CELL:
+            tone, view = metadata.get("tone", ""), metadata.get("view", "")
+            frozen, unresolved = self._freeze_matrix_inputs(
+                style, tone, view, memo=memo,
+            )
+            return frozen, deferred, unresolved, self._cell_size_from_frozen(frozen)
+
+        if metadata.get("use_style_reference"):
+            candidate = Path(metadata.get("style_reference_path")
+                             or style.get("reference_image_path") or "")
+            entry = self._freeze_path(candidate, role="style_reference", kind="reference")
+            if entry is not None:
+                frozen.append(entry)
+            else:
+                unresolved.append({
+                    "role": "style_reference",
+                    "reason": f"uploaded style reference missing at {candidate}",
+                })
+        if output_type == OUTPUT_HERO and metadata.get("use_hero_reference"):
+            plan = Path(style.get("plan_image_path") or "")
+            if plan.is_file():
+                try:
+                    cells, crop_revision = self._selected_split(style, memo=memo)
+                    frozen.append(self._freeze_view_plan(
+                        plan, "hero", memo=memo, output_type=OUTPUT_HERO,
+                        cells=cells, crop_revision=crop_revision,
+                    ))
+                except (ConflictError, PlanError, OSError) as exc:
+                    unresolved.append({
+                        "role": "view_plan",
+                        "reason": "Hero View Plan compilation failed: "
+                                  f"{str(exc)[:200]}. Review or override the split, "
+                                  "then re-queue.",
+                    })
+            else:
+                unresolved.append({
+                    "role": "view_plan",
+                    "reason": "Hero requires an uploaded 2x5 plan so Studio can "
+                              "compile a pose-shaped View Plan; generated grids are "
+                              "not accepted as design authority.",
+                })
+            photo = self._freeze_path(Path(style.get("reference_image_path") or ""),
+                                      role="photography_reference", kind="reference")
+            if photo is not None:
+                frozen.append(photo)
+            else:
+                unresolved.append({
+                    "role": "photography_reference",
+                    "reason": "Hero requires a photography reference for pose, hand "
+                              "geometry, background, crop, lighting, and skin.",
+                })
+        if output_type == OUTPUT_WEARING and metadata.get("use_reference"):
+            deferred.append({
+                "role": "grid",
+                "reason": "a wearing shot copies the grid generated later in this "
+                          "batch, so its digest cannot exist yet",
+            })
+        return frozen, deferred, unresolved, self._size_for_output(output_type)
+
+    def _freeze_path(self, path: Path, *, role: str, kind: str) -> FrozenInput | None:
+        """Copy a file into the store and freeze it under `role`, or None if absent.
+
+        Copied rather than referenced where it sits: uploads land on fixed paths
+        (`plan-{style}.png`, `hand_model_{tone}_{view}`), so re-uploading used to
+        change the bytes an already-queued task would send. In the store the filename
+        is the hash and an overwrite is impossible by construction.
+        """
+        if not path.is_file():
+            return None
+        ref = store_file(self.db, self.config, path, kind=kind)
+        return freeze_input(ref, role=role)
+
+    def _freeze_matrix_inputs(
+        self, style: dict, tone: str, view: str, *, memo: dict,
+    ) -> tuple[list[FrozenInput], list[dict]]:
+        """Compile and freeze one cell's inputs: (frozen, unresolved).
+
+        Runs OUTSIDE the write transaction. It compiles an image and writes to the
+        content-addressed store, and holding SQLite's write lock across a second of
+        Pillow work would stall every other writer.
+
+        The view-plan is compiled HERE rather than in the worker. Compiling at
+        execution time meant the prompt (frozen at queue time, describing captioned
+        tiles) and the image (produced at execution time, by whatever code was
+        loaded) came from two different moments — the exact gap the four cells of
+        2026-08-06 fell through. Compiling once, at queue time, into an immutable
+        digest makes them one decision.
+
+        `memo` caches compiles by (plan digest, view) across the cells of one call,
+        so a 16-cell matrix over 4 views compiles 4 times. It replaces the on-disk
+        `viewplans/` cache, whose key was the plan digest and view but NOT the
+        contract hash: editing `screen_slots` produced a new prompt version and a
+        new fingerprint while still serving the old compiled PNG.
+
+        Only an uploaded plan counts as the design authority. A generated grid is
+        refused (a cell copying a generated image bakes its drift into all sixteen),
+        so accepting one here would freeze an input the worker will not use.
+        """
+        frozen: list[FrozenInput] = []
+        unresolved: list[dict] = []
+
         plan = Path(style.get("plan_image_path") or "")
-        if plan.is_file():
-            paths.append(plan)
-        hand = self._matrix_hand_model(conn, tone, view)
-        if hand is not None:
-            paths.append(hand)
-        return paths
+        if not plan.is_file():
+            unresolved.append({
+                "role": "view_plan",
+                "reason": "this style has no uploaded plan image, so it has no design "
+                          "authority; a generated grid is deliberately not accepted as "
+                          "one. Upload the plan on the style page, then re-queue.",
+            })
+        else:
+            try:
+                cells, crop_revision = self._selected_split(style, memo=memo)
+                frozen.append(self._freeze_view_plan(
+                    plan, view, memo=memo, cells=cells,
+                    crop_revision=crop_revision,
+                ))
+            except (ConflictError, PlanError, OSError) as exc:
+                unresolved.append({
+                    "role": "view_plan",
+                    "reason": "View Plan split is not approved: "
+                              f"{str(exc)[:220]}. Review the contact sheet or "
+                              "submit a manual split override, then re-queue.",
+                })
+
+        hand = self._hand_model_path(tone, view)
+        if hand is None:
+            unresolved.append({
+                "role": "base_hand",
+                "reason": f"no hand model configured for tone={tone!r} view={view!r}; "
+                          f"upload it on the settings page, then re-queue this cell",
+            })
+        else:
+            # Copied into the store, not referenced where it sits. Hand models are
+            # written to a fixed {tone}-{view} path, so a re-upload used to change
+            # the bytes a queued cell would send. Inside the store the filename is
+            # the hash, and an overwrite is impossible by construction.
+            ref = store_file(self.db, self.config, hand, kind="hand_base")
+            frozen.append(freeze_input(ref, role="base_hand"))
+        return frozen, unresolved
+
+    def _freeze_view_plan(
+        self, plan: Path, view: str, *, memo: dict,
+        output_type: str = OUTPUT_MATRIX_CELL,
+        cells: dict[str, tuple[int, int, int, int]] | None = None,
+        crop_revision: dict | None = None,
+    ) -> FrozenInput:
+        """The plan recompiled into `view`'s screen order, stored by digest.
+
+        There is no raw-plan fallback. Both Hero and Matrix promise a pose-shaped
+        Image 1; substituting the source 2x5 plan would silently hand spatial
+        mapping back to the model.
+        """
+        plan_digest = digest_of_file(plan)
+        contract_version = (
+            HERO_PROMPT_VERSION if output_type == OUTPUT_HERO else MATRIX_PROMPT_VERSION
+        )
+        crop_revision_id = (
+            crop_revision.get("crop_revision_id") if crop_revision else "legacy-auto"
+        )
+        key = (plan_digest, crop_revision_id, output_type, view, contract_version)
+        if key in memo:
+            return memo[key]
+
+        spec = (
+            hero_view_plan_spec()
+            if output_type == OUTPUT_HERO
+            else matrix_view_plan_spec(view)
+        )
+        frozen: FrozenInput
+        if not spec:
+            raise PlanError(f"{view} pose contract has no pose_map")
+        else:
+            data = build_spatial_view_plan(
+                plan,
+                visible_nails=spec["visible_nails"],
+                pose_map=spec["pose_map"],
+                anatomy=NAIL_ANATOMY,
+                title=spec["title"],
+                cells=cells,
+            )
+            ref = store_bytes(self.db, self.config, data, kind="view_plan",
+                              ext=".png", mime_type="image/png")
+            frozen = freeze_input(ref, role="view_plan", derived_from={
+                "plan_digest": plan_digest,
+                "view": view,
+                # The contract that ordered the tiles. Its hash is embedded in
+                # prompt_version, so a pose_map edit is visible here and in the
+                # prompt version together.
+                "contract_version": contract_version,
+                "compiler": "spatial-v1",
+                "crop_revision_id": crop_revision_id,
+                "split_source": crop_revision.get("source") if crop_revision else "inline-auto",
+                "split_confidence": (
+                    crop_revision.get("confidence") if crop_revision else None
+                ),
+            })
+        memo[key] = frozen
+        return frozen
+
+    def _selected_split(
+        self, style: dict, *, memo: dict,
+    ) -> tuple[dict[str, tuple[int, int, int, int]], dict]:
+        """Current plan's latest approved split, cached across one queue call."""
+        style_id = style["style_id"]
+        plan = Path(style.get("plan_image_path") or "")
+        key = ("crop_revision", style_id, digest_of_file(plan) if plan.is_file() else "missing")
+        if key not in memo:
+            memo[key] = SplitService(self.db, self.config).selected(
+                style_id, require_human_approval=False,
+            )
+        return memo[key]
+
+    def _hand_model_path(self, tone: str, view: str) -> Path | None:
+        """The base hand photo for one cell, read outside any transaction."""
+        return self._matrix_hand_model(self.db.conn(), tone, view)
 
     @staticmethod
     def _matrix_hand_model(conn, tone: str, view: str) -> Path | None:
@@ -560,18 +952,25 @@ class TaskService:
             return Path(row["value"])
         return None
 
-    def _matrix_cell_size(self, conn, tone: str, view: str) -> tuple[int, int]:
-        """Request size for one cell: the base hand photo's aspect ratio.
+    def _cell_size_from_frozen(self, frozen: list[FrozenInput]) -> tuple[int, int]:
+        """Request size for one cell, from the FROZEN base hand's aspect ratio.
 
-        Falls back to the configured wearing size when the hand model is missing —
-        such a cell is blocked as `dependency_missing` before it ever reaches the
-        provider, so the value only has to be present, not meaningful.
+        A cell must come out the shape of its base hand photo: `size` is a hard API
+        constraint while "match the crop" is only prose, so a square request against
+        a 4:3 base stretched the hand on every cell.
+
+        Derived from the frozen bytes rather than from the hand model on disk. The
+        worker recomputed this at execution time from the current `app_settings`, so
+        replacing a hand model silently changed the size an already-queued cell
+        would request — and the snapshot's `size` said otherwise.
+
+        Falls back to the configured wearing size when there is no base hand: such a
+        cell has an `unresolved_inputs` entry and is blocked before the provider, so
+        the value only has to be present, not meaningful.
         """
-        hand = self._matrix_hand_model(conn, tone, view)
-        if hand is not None:
-            derived = size_from_reference(hand)
-            if derived is not None:
-                return derived
+        for item in frozen:
+            if item.role == "base_hand" and item.width and item.height:
+                return legal_size_for_ratio(item.width, item.height)
         return self.config.wearing_size
 
     def _matrix_axes(self, tones: list[str] | None,
@@ -586,6 +985,7 @@ class TaskService:
         self, style_id: str, *, tones: list[str] | None = None,
         views: list[str] | None = None, force: bool = False, note: str = "",
         confirmed_max_usd: float | None = None,
+        mode: str = "batch",
     ) -> GenerationPlan:
         """Queue the try-on matrix for one style: every tone x view cell.
 
@@ -595,17 +995,30 @@ class TaskService:
         and a price change between preview and submit re-prompts instead of
         silently charging more.
         """
-        from .models import OUTPUT_MATRIX_CELL
-
         style = self.get_style(style_id)
         spec = self.spec_for(style)
         tones, views = self._matrix_axes(tones, views)
         provider_name, model, price, profile_row = self._generation_channel_row()
         profile_name = profile_row["name"] if profile_row else None
         use_refs = self.config.reference_mode != "off"
+        policy = resolve_policy(mode, OUTPUT_MATRIX_CELL)
 
-        estimate = self.estimate_matrix(style_id, tones=tones, views=views, force=force)
+        estimate = self.estimate_matrix(
+            style_id, tones=tones, views=views, force=force, mode=mode
+        )
         self._require_cost_authorization(estimate, confirmed_max_usd)
+
+        # Compile and store every cell's inputs BEFORE opening the write
+        # transaction: this does Pillow work and its own store writes, and holding
+        # SQLite's write lock across it would stall every other writer. One memo
+        # across all cells means four compiles for a sixteen-cell matrix.
+        view_plan_memo: dict = {}
+        cell_inputs: dict[tuple[str, str], tuple[list[FrozenInput], list[dict]]] = {
+            (tone, view): self._freeze_matrix_inputs(
+                style, tone, view, memo=view_plan_memo,
+            )
+            for tone in tones for view in views
+        }
 
         conn = self.db.conn()
         batch_id = new_batch_id()
@@ -629,7 +1042,9 @@ class TaskService:
                     prompt = build_matrix_prompt(
                         spec, style.get("identity_text"), tone, view, with_reference=use_refs
                     )
-                    nonce = batch_id if force else ""
+                    nonce = batch_id if force else (
+                        "" if policy.mode == "batch" else "mode:precision"
+                    )
                     key = self.idempotency_key(
                         style_id, OUTPUT_MATRIX_CELL, MATRIX_PROMPT_VERSION, prompt, nonce
                     )
@@ -649,6 +1064,20 @@ class TaskService:
                                             "output_type": OUTPUT_MATRIX_CELL, **cell,
                                             "reason": "already succeeded"})
                             continue
+                        # Re-plan against current inputs: a cell blocked for a missing
+                        # hand model froze "absent", and the worker executes only from
+                        # the snapshot.
+                        frozen, unresolved = cell_inputs[(tone, view)]
+                        self._refreeze_locked(
+                            conn, existing["task_id"], style=style,
+                            output_type=OUTPUT_MATRIX_CELL, prompt=prompt,
+                            negative_prompt="", prompt_version=MATRIX_PROMPT_VERSION,
+                            provider=provider_name, model=model,
+                            frozen=(frozen, [], unresolved,
+                                    self._cell_size_from_frozen(frozen)),
+                            extra={"tone": tone, "view": view,
+                                   "generation_policy": policy.as_dict()},
+                        )
                         self._transition_locked(conn, existing["task_id"], status, PENDING,
                                                 error_code=None, error_message=None,
                                                 next_attempt_at=None, retry_count=0)
@@ -657,24 +1086,35 @@ class TaskService:
                                        "reason": "re-queued failed cell"})
                         continue
                     task_id = new_task_id()
-                    metadata: dict = {"tone": tone, "view": view}
+                    metadata: dict = {
+                        "tone": tone,
+                        "view": view,
+                        "generation_mode": policy.mode,
+                        "generation_policy": policy.as_dict(),
+                    }
                     if note:
                         metadata["note"] = note
                     if profile_name:
                         metadata["api_profile"] = profile_name
                     if use_refs:
                         metadata["use_matrix_reference"] = True
-                    # A cell's inputs exist now: the design authority (plan or the
-                    # latest grid) and the tone+view hand model. Freezing them by
-                    # digest is what makes a re-upload unable to rewrite history.
-                    cell_inputs = self._matrix_input_paths(conn, style, tone, view)
+                    # Frozen above, outside this transaction: the compiled view-plan
+                    # and the base hand photo, both by digest and both tagged with
+                    # the role they serve.
+                    frozen, unresolved = cell_inputs[(tone, view)]
                     snapshot, fingerprint = self._snapshot_for(
                         conn, style=style, output_type=OUTPUT_MATRIX_CELL, prompt=prompt,
                         negative_prompt="", prompt_version=MATRIX_PROMPT_VERSION,
                         provider=provider_name, model=model,
-                        size=self._matrix_cell_size(conn, tone, view), profile_row=profile_row,
-                        input_paths=cell_inputs, asset_kind="hand_model",
-                        extra={"tone": tone, "view": view},
+                        # Derived from the FROZEN base hand's pixels, not from the
+                        # hand model currently in app_settings. The worker used to
+                        # recompute this at execution time, so a re-upload changed
+                        # the requested size of an already-queued cell.
+                        size=self._cell_size_from_frozen(frozen),
+                        profile_row=profile_row,
+                        frozen_inputs=frozen, unresolved_inputs=unresolved,
+                        extra={"tone": tone, "view": view,
+                               "generation_policy": policy.as_dict()},
                     )
                     conn.execute(
                         "INSERT INTO tasks (task_id, batch_id, style_id, sku, output_type, prompt,"
@@ -741,6 +1181,7 @@ class TaskService:
         *,
         correction_text: str,
         detail_references: list[Path] | None = None,
+        detail_nails: list[str] | None = None,
         owner_override: str = "",
     ) -> dict:
         """v2+ per SOP: a locked-base local edit of a successful candidate."""
@@ -749,23 +1190,68 @@ class TaskService:
             raise ConflictError("corrections start from a successful candidate with an image")
         if not correction_text.strip():
             raise ValueError("correction text is required — it is the only allowed change")
-        details = [path for path in (detail_references or []) if path.is_file()]
+        details: list[tuple[Path, str | None, str | None]] = [
+            (path, None, None)
+            for path in (detail_references or [])
+            if path.is_file()
+        ]
 
+        # A nail id resolves to the exact crop revision that produced the source
+        # task's View Plan. It cannot drift to a newly uploaded plan while a
+        # correction is queued.
+        requested_nails = list(dict.fromkeys(detail_nails or []))
+        source_snapshot = get_snapshot(self.db, task_id)
+        crop_revision_id: str | None = None
+        if source_snapshot:
+            for entry in source_snapshot["snapshot"].get("input_assets", []):
+                if entry.get("role") == "view_plan":
+                    candidate_revision = (entry.get("derived_from") or {}).get(
+                        "crop_revision_id"
+                    )
+                    if isinstance(candidate_revision, str):
+                        crop_revision_id = candidate_revision
+                    break
+        if requested_nails and not crop_revision_id:
+            raise ConflictError(
+                "this candidate has no crop revision provenance; upload a detail "
+                "file explicitly or regenerate from a reviewed split"
+            )
+        splitter = SplitService(self.db, self.config)
+        if requested_nails:
+            assert crop_revision_id is not None
+            for nail_id in requested_nails:
+                details.append((
+                    splitter.nail_crop(crop_revision_id, nail_id),
+                    nail_id,
+                    crop_revision_id,
+                ))
+
+        # A version budget belongs to one candidate lineage, not every matrix cell
+        # sharing a style and output_type. The old query made the first few cells
+        # consume the correction allowance for all other cells.
+        root_task_id = source.get("root_task_id") or source["task_id"]
+        policy = source["metadata"].get("generation_policy") or resolve_policy(
+            source["metadata"].get("generation_mode"), source["output_type"]
+        ).as_dict()
+        max_versions = int(policy.get("max_creative_versions", CORRECTION_BUDGET))
         version = int(source["metadata"].get("version", 1)) + 1
         chain = self.db.conn().execute(
-            "SELECT COUNT(*) AS n FROM tasks WHERE style_id = ? AND output_type = ?",
-            (source["style_id"], source["output_type"]),
+            "SELECT COUNT(*) AS n FROM tasks WHERE root_task_id = ?",
+            (root_task_id,),
         ).fetchone()["n"]
-        if chain >= CORRECTION_BUDGET and not owner_override:
+        if chain >= max_versions and not owner_override:
             raise ConflictError(
-                f"attempt budget exhausted ({chain}/{CORRECTION_BUDGET} versions for this "
-                f"style+type); per SOP this style is BLOCKED pending owner review. "
+                f"attempt budget exhausted ({chain}/{max_versions} versions in this "
+                f"candidate lineage); per SOP this candidate is BLOCKED pending owner review. "
                 f"Pass owner_override to continue."
             )
 
         provider_name, model, price, profile_row = self._generation_channel_row()
         profile_name = profile_row["name"] if profile_row else None
-        prompt = build_correction_prompt(source["prompt"], correction_text, len(details))
+        prompt = build_correction_prompt(
+            source["prompt"], correction_text, len(details),
+            [nail_id for _, nail_id, _ in details if nail_id],
+        )
         conn = self.db.conn()
         batch_id = new_batch_id()
         now = utcnow()
@@ -774,7 +1260,10 @@ class TaskService:
             "correction_of": task_id,
             "version": version,
             "correction_text": correction_text.strip()[:2000],
-            "correction_details": [str(path) for path in details],
+            "correction_details": [str(path) for path, _, _ in details],
+            "correction_detail_nails": requested_nails,
+            "generation_mode": policy.get("mode", "precision"),
+            "generation_policy": policy,
         }
         if profile_name:
             metadata["api_profile"] = profile_name
@@ -786,31 +1275,75 @@ class TaskService:
                 metadata[key] = source["metadata"][key]
         # A correction stays inside the source's lineage, so an automatic
         # correction spends the shared allowance instead of starting a new one.
-        root_task_id = source.get("root_task_id") or source["task_id"]
         with transaction(conn):
             conn.execute(
                 "INSERT INTO batches (batch_id, note, created_at) VALUES (?,?,?)",
                 (batch_id, f"correction v{version} of {task_id}", now),
             )
-            # A correction's inputs are the locked base image plus any detail
-            # references, all of which exist now.
-            correction_inputs = [Path(source["output_path"])]
-            correction_inputs.extend(details)
+            # A correction's inputs all exist now: the locked base image and any
+            # detail crops. The base carries the `correction_base` role so the worker
+            # does not have to infer it from list position.
+            frozen_correction: list[FrozenInput] = []
+            unresolved_correction: list[dict] = []
+            base_entry = freeze_file_locked(
+                conn, Path(source["output_path"]), role="correction_base",
+                kind="output")
+            if base_entry is not None:
+                frozen_correction.append(base_entry)
+            else:
+                unresolved_correction.append({
+                    "role": "correction_base",
+                    "reason": f"the corrected candidate's image is missing at "
+                              f"{source['output_path']}",
+                })
+            for detail, detail_nail_id, detail_revision_id in details:
+                derived_from = (
+                    {"nail_id": detail_nail_id,
+                     "crop_revision_id": detail_revision_id}
+                    if detail_nail_id and detail_revision_id else None
+                )
+                entry = freeze_file_locked(
+                    conn, detail, role="correction_detail",
+                    kind="correction_detail", derived_from=derived_from,
+                )
+                if entry is not None:
+                    frozen_correction.append(entry)
+            # A correction re-sends the authority images the source used, so its
+            # snapshot inherits them by digest rather than re-resolving them.
+            if source_snapshot:
+                authority = [
+                    entry for entry in source_snapshot["snapshot"].get("input_assets", [])
+                    if entry.get("role") in AUTHORITY_ROLES
+                ]
+                # Authority first, then the edit base, matching SOP v2+ ordering.
+                frozen_correction = [
+                    FrozenInput(
+                        role=entry["role"], digest=entry["digest"], path=entry["path"],
+                        byte_size=entry.get("byte_size", 0),
+                        mime_type=entry.get("mime_type", "image/png"),
+                        width=(entry.get("size") or [None, None])[0],
+                        height=(entry.get("size") or [None, None])[1],
+                        derived_from=entry.get("derived_from"),
+                    )
+                    for entry in authority
+                ] + frozen_correction
             snapshot, fingerprint = self._snapshot_for(
                 conn, style=self.get_style(source["style_id"]),
                 output_type=source["output_type"], prompt=prompt,
                 negative_prompt=source["negative_prompt"],
                 prompt_version=source["prompt_version"],
                 provider=provider_name, model=model,
-                size=self._size_for_output(source["output_type"]),
-                profile_row=profile_row, input_paths=correction_inputs,
-                asset_kind="correction_detail",
+                size=self._size_for_correction(source),
+                profile_row=profile_row,
+                frozen_inputs=frozen_correction,
+                unresolved_inputs=unresolved_correction,
                 extra={
                     "correction_of": task_id,
                     "version": version,
                     # The instruction is an input: the same base image with a
                     # different instruction is a different task.
                     "correction_text": correction_text.strip()[:2000],
+                    "generation_policy": policy,
                 },
             )
             conn.execute(
@@ -1415,6 +1948,12 @@ class TaskService:
                 f"task is {task['status']}; only failed or cancelled tasks can be retried. "
                 "To regenerate a successful task, create a new generation with force=true."
             )
+        # Re-freeze first: a task blocked for a missing hand model froze "this input
+        # was absent", and the worker now executes only from the snapshot, so
+        # retrying against the old one would block forever. The operator's retry IS
+        # the decision to re-plan against current inputs — an explicit act, not a
+        # fallback, and it happens while the task is not claimable.
+        self.refreeze_snapshot(task_id)
         metadata = task["metadata"]
         metadata.setdefault("manual_retries", []).append({"at": utcnow(), "note": note})
         return self.transition(

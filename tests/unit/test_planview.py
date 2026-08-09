@@ -17,6 +17,7 @@ from lunelle.nailslots import NAIL_ANATOMY
 from lunelle.planview import (
     PLAN_CELLS,
     PlanError,
+    build_spatial_view_plan,
     build_view_plan,
     cell_box,
     compile_view_plan,
@@ -24,7 +25,12 @@ from lunelle.planview import (
     detect_cells,
     view_plan_digest,
 )
-from lunelle.prompts import MATRIX_VIEWS, matrix_view_plan_rows
+from lunelle.prompts import (
+    MATRIX_VIEWS,
+    hero_view_plan_spec,
+    matrix_view_plan_rows,
+    matrix_view_plan_spec,
+)
 
 
 def synthetic_plan(path, *, cols=5, rows=2, uneven=False, margin=40,
@@ -217,6 +223,60 @@ class TestBuildViewPlan:
         first = build_view_plan(plan, rows, anatomy=NAIL_ANATOMY)
         second = build_view_plan(plan, rows, anatomy=NAIL_ANATOMY)
         assert view_plan_digest(first) == view_plan_digest(second)
+
+
+class TestBuildSpatialViewPlan:
+    @pytest.mark.parametrize("view", MATRIX_VIEWS)
+    def test_compiles_every_matrix_pose_map(self, tmp_path, view):
+        plan = synthetic_plan(tmp_path / f"{view}.png")
+        spec = matrix_view_plan_spec(view)
+        data = build_spatial_view_plan(
+            plan,
+            visible_nails=spec["visible_nails"],
+            pose_map=spec["pose_map"],
+            anatomy=NAIL_ANATOMY,
+            title=spec["title"],
+        )
+        assert data[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_compiles_hero_to_landscape_contract_canvas(self, tmp_path):
+        import io
+
+        plan = synthetic_plan(tmp_path / "hero.png")
+        spec = hero_view_plan_spec()
+        data = build_spatial_view_plan(
+            plan,
+            visible_nails=spec["visible_nails"],
+            pose_map=spec["pose_map"],
+            anatomy=NAIL_ANATOMY,
+            title=spec["title"],
+        )
+        with Image.open(io.BytesIO(data)) as image:
+            assert image.size == (1536, 1024)
+
+    def test_is_deterministic(self, tmp_path):
+        plan = synthetic_plan(tmp_path / "stable.png")
+        spec = hero_view_plan_spec()
+        first = build_spatial_view_plan(
+            plan, visible_nails=spec["visible_nails"], pose_map=spec["pose_map"],
+            anatomy=NAIL_ANATOMY, title=spec["title"],
+        )
+        second = build_spatial_view_plan(
+            plan, visible_nails=spec["visible_nails"], pose_map=spec["pose_map"],
+            anatomy=NAIL_ANATOMY, title=spec["title"],
+        )
+        assert view_plan_digest(first) == view_plan_digest(second)
+
+    def test_rejects_an_incomplete_pose_map(self, tmp_path):
+        plan = synthetic_plan(tmp_path / "bad-map.png")
+        with pytest.raises(PlanError, match="pose_map mismatch"):
+            build_spatial_view_plan(
+                plan,
+                visible_nails=["nail-01", "nail-02"],
+                pose_map={"nail-01": {"x": 0.2, "y": 0.3}},
+                anatomy=NAIL_ANATOMY,
+                title="bad",
+            )
 
     def test_different_views_give_different_images(self, tmp_path):
         # p2 and p4 differ only in ordering; if the compiler ignored order they

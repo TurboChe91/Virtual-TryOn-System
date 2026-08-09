@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,7 +35,14 @@ KINDS = ("reference", "plan", "hand_model", "correction_detail", "output", "othe
          # Nail Slot assets: the clean base photo actually sent to the provider,
          # the colour annotation it was derived from (provenance only, never
          # uploaded), and one derived per-nail mask.
-         "hand_base", "hand_annotation", "nail_mask")
+         "hand_base", "hand_annotation", "nail_mask",
+         # A plan recompiled into one view's screen order, compiled at queue time
+         # and sent as Image 1. Distinct from `plan`: the raw plan is the operator's
+         # upload, this is a derived asset whose provenance (source plan digest,
+         # view, contract version) is recorded on the snapshot entry.
+         "view_plan",
+         # Versioned plan-splitting evidence and per-nail authorities.
+         "split_preview", "contact_sheet", "nail_crop")
 
 MIME_BY_EXT = {
     ".png": "image/png",
@@ -78,13 +86,27 @@ def content_path(config: Config, digest: str, ext: str) -> Path:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
+    """Write bytes to `path` atomically, safe against concurrent identical writers.
+
+    The temp name must be unique per writer, which a fixed `.tmp` suffix is not: in
+    this store the destination name IS the digest, so two threads storing the SAME
+    bytes derive the SAME temp path. One thread's `os.replace` then moves the file
+    the other is about to rename, and the loser fails with ENOENT. Two matrix queues
+    sharing a hand model hit this immediately — six concurrent submissions of
+    identical hand-model bytes raised FileNotFoundError here.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    handle_fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(handle_fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def store_bytes(db: Database, config: Config, data: bytes, *, kind: str,

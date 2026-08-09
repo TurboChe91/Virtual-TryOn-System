@@ -148,6 +148,39 @@ class TestAutomaticWorkIsBounded:
         finally:
             db.close_all()
 
+    def test_precision_policy_disables_creative_rerolls_but_keeps_the_result(
+        self, tmp_path,
+    ):
+        config = make_config(tmp_path, auto_regen_max=1, max_lineage_descendants=5,
+                             max_retries=0, max_concurrency=1)
+        from lunelle.db import Database, migrate
+        from lunelle.tasks import TaskService
+
+        db = Database(config.db_path)
+        migrate(db.conn())
+        service = TaskService(db, config)
+        try:
+            style = make_style(service)
+            plan = service.create_generation(
+                style["style_id"], ["grid"], mode="precision"
+            )
+            root = plan.created[0]["task_id"]
+            provider = AlwaysFailingQaProvider(allowed=True)
+            worker = Worker(config, db, service, provider)
+            worker.start()
+            try:
+                _drain(service)
+            finally:
+                worker.stop()
+
+            tasks = service.list_tasks(limit=500)
+            assert len(tasks) == 1
+            assert provider.calls == 1
+            assert service.get_task(root)["metadata"]["generation_mode"] == "precision"
+            assert lineage_status(db, root)["descendant_count"] == 0
+        finally:
+            db.close_all()
+
     def test_descendants_inherit_the_root_rather_than_starting_a_new_lineage(
         self, config, db, service
     ):

@@ -15,8 +15,10 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from PIL import Image, UnidentifiedImageError
 
 from . import __version__
-from .assets import assets_root, store_bytes
+from .assets import assets_root, get_asset, store_bytes
 from .budget import BudgetExceeded, spend_snapshot
+from .build import describe as describe_build
+from .build import detect_drift
 from .config import Config, load_config
 from .db import Database, db_healthy, migrate
 from .errors import CostConfirmationRequired
@@ -40,15 +42,18 @@ from .schemas import (
     ExportRequest,
     GenerateRequest,
     IdentityRequest,
+    ManualSplitRequest,
     MatrixRequest,
     ProfileCreateRequest,
     ProfileUpdateRequest,
     RetryRequest,
     ReviewRequest,
+    SplitReviewRequest,
     StyleCreateRequest,
     TryonIdRequest,
 )
 from .snapshots import find_by_fingerprint, get_executions, get_snapshot
+from .splits import SplitService
 from .stats import collect_stats
 from .styles import StyleInputError, build_style_spec
 from .tasks import ConflictError, NotFoundError, TaskService
@@ -88,10 +93,21 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         )
         if start_worker and os.environ.get("LUNELLE_DISABLE_WORKER") != "1":
             worker.start()
+        # The RESOLVED channel, not the env default. This log used to print
+        # config.image_model ('doubao-seedream-4-5-251128') while the active profile
+        # was actually sending to gpt-image-2, so the one line an operator checks at
+        # startup named a model the process never used. Read from the profile row
+        # directly: building a provider here would validate a URL and can fail.
+        active = app.state.profiles.active_row()
+        build = describe_build()
         logger.info(
             "lunelle studio started",
-            extra={"ctx": {"stage": "startup", "provider": config.image_provider,
-                            "model": config.image_model}},
+            extra={"ctx": {
+                "stage": "startup",
+                "provider": "openai-compat" if active else config.image_provider,
+                "model": active["model"] if active else config.image_model,
+                "status": f"build={build['build_id']}",
+            }},
         )
         try:
             yield
@@ -190,22 +206,33 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": __version__}
+        # build is here rather than only in /ready because it must be readable
+        # BEFORE a paid run, from a probe that needs no admin token: "is the process
+        # running the code I think it is" was the question nobody could answer.
+        return {"status": "ok", "version": __version__, "build": describe_build()}
 
     @app.get("/ready")
     def ready(request: Request):
         db: Database = request.app.state.db
         worker: Worker = request.app.state.worker
+        drift = detect_drift()
         checks = {
             "database": db_healthy(db.conn()),
             "output_dir_writable": _writable(config.output_dir),
             "data_dir_writable": _writable(config.data_dir),
             "config_valid": not config.validate_for_serve(),
             "worker_alive": worker.is_alive() or os.environ.get("LUNELLE_DISABLE_WORKER") == "1",
+            # Degraded, not failed: the API still serves and the queue is intact.
+            # The worker has stopped claiming, which is a state an operator must see
+            # in the readiness probe rather than infer from an idle queue.
+            "runtime_build_current": not drift.drifted,
         }
         ok = all(checks.values())
-        return JSONResponse(status_code=200 if ok else 503,
-                            content={"status": "ready" if ok else "degraded", "checks": checks})
+        content = {"status": "ready" if ok else "degraded", "checks": checks,
+                   "build": describe_build()}
+        if drift.drifted:
+            content["runtime_drift"] = drift.summary()
+        return JSONResponse(status_code=200 if ok else 503, content=content)
 
     # ---------------- styles ----------------
 
@@ -256,6 +283,21 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
             },
         }
 
+    @app.get("/api/assets/{digest}")
+    def asset_image(digest: str, request: Request):
+        """Serve an immutable derived preview/crop by its full content digest."""
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise HTTPException(status_code=404, detail="asset not found")
+        record = get_asset(request.app.state.db, digest)
+        if record is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        path = Path(record["path"]).resolve()
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="asset bytes missing")
+        if not path.is_relative_to(config.asset_dir.resolve()):
+            raise HTTPException(status_code=403, detail="asset path outside storage root")
+        return FileResponse(path, media_type=record["mime_type"])
+
     def _validated_upload(data: bytes) -> tuple[str, str]:
         """Shared image-upload validation: returns (format, extension)."""
         limit = config.max_upload_mb * 1024 * 1024
@@ -302,7 +344,15 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         # that is no longer the authority.
         identity_derived = False
         identity_error = None
+        split = None
+        split_error = None
         if kind == "plan":
+            try:
+                split = SplitService(request.app.state.db, config).analyze(
+                    style_id, created_by=_reviewer_from(request)
+                )
+            except (ConflictError, ValueError) as exc:
+                split_error = str(exc)[:300]
             try:
                 from .llm import (
                     LLMUnavailable,
@@ -322,7 +372,8 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
                                style_id, identity_error)
         return {"stored": str(dest.name), "kind": kind, "format": fmt,
                 "bytes": len(data), "identity_derived": identity_derived,
-                "identity_error": identity_error}
+                "identity_error": identity_error, "split": split,
+                "split_error": split_error}
 
     @app.post("/api/styles/from-image", status_code=201, dependencies=[Depends(require_admin)])
     async def create_style_from_image(request: Request,
@@ -333,10 +384,8 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         """Customer flow B: upload a design photo, let the vision LLM draft the style.
 
         `kind` defaults to plan because the usual upload IS the 2x5 set plan, and the
-        plan is the design authority every downstream step reads. Storing it as a mere
-        reference left `plan_image_path` empty, and matrix cells then fell back to
-        "the most recent successful grid" — i.e. copying an earlier generated image
-        instead of the operator's actual design. Pass kind=reference for a worn photo.
+        plan is the design authority every downstream step reads. Pass
+        kind=reference for a worn photo.
         """
         from . import vocab
         from .llm import LLMUnavailable, build_llm_chat, style_fields_from_image
@@ -397,10 +446,20 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
                            style["style_id"], identity_error)
 
         style = service.get_style(style["style_id"])
+        split = None
+        split_error = None
+        if kind == "plan":
+            try:
+                split = SplitService(request.app.state.db, config).analyze(
+                    style["style_id"], created_by=_reviewer_from(request)
+                )
+            except (ConflictError, ValueError) as exc:
+                split_error = str(exc)[:300]
         return {"style": style, "recognized": fields, "warnings": outcome.warnings,
                 "parser": "vision-llm", "uploaded_as": kind,
                 "identity_derived": identity_error is None,
-                "identity_error": identity_error}
+                "identity_error": identity_error, "split": split,
+                "split_error": split_error}
 
     @app.post("/api/styles/{style_id}/identify", dependencies=[Depends(require_admin)])
     def identify_style(style_id: str, request: Request):
@@ -437,13 +496,48 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         service.set_identity_text(style_id, body.identity_text)
         return {"style_id": style_id, "identity_set": bool(body.identity_text.strip())}
 
+    # ---------------- plan split revisions ----------------
+
+    @app.get("/api/styles/{style_id}/splits", dependencies=[Depends(require_admin)])
+    def list_splits(style_id: str, request: Request):
+        revisions = SplitService(request.app.state.db, config).list(style_id)
+        return {"style_id": style_id, "revisions": revisions}
+
+    @app.post("/api/styles/{style_id}/splits/analyze",
+              dependencies=[Depends(require_admin)])
+    def analyze_split(style_id: str, request: Request):
+        return SplitService(request.app.state.db, config).analyze(
+            style_id, created_by=_reviewer_from(request)
+        )
+
+    @app.post("/api/styles/{style_id}/splits/manual", status_code=201,
+              dependencies=[Depends(require_admin)])
+    def manual_split(style_id: str, body: ManualSplitRequest, request: Request):
+        boxes = {item.nail_id: item.bbox for item in body.boxes}
+        try:
+            return SplitService(request.app.state.db, config).create_manual(
+                style_id, boxes, created_by=_reviewer_from(request)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/splits/{revision_id}/review", dependencies=[Depends(require_admin)])
+    def review_split(revision_id: str, body: SplitReviewRequest, request: Request):
+        splitter = SplitService(request.app.state.db, config)
+        reviewer = _reviewer_from(request)
+        return (
+            splitter.approve(revision_id, reviewer=reviewer)
+            if body.approved else splitter.reject(revision_id, reviewer=reviewer)
+        )
+
     # ---------------- generation & tasks ----------------
 
     @app.post("/api/styles/{style_id}/generate", status_code=202,
               dependencies=[Depends(require_admin)])
     def generate(style_id: str, body: GenerateRequest, request: Request):
         plan = request.app.state.service.create_generation(
-            style_id, body.output_types, force=body.force, note=body.note
+            style_id, body.output_types, force=body.force, note=body.note,
+            mode=body.mode,
         )
         return {"batch_id": plan.batch_id, "created": plan.created,
                 "reused": plan.reused, "skipped": plan.skipped}
@@ -576,7 +670,7 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         try:
             return request.app.state.service.estimate_matrix(
                 style_id, tones=body.tones or None, views=body.views or None,
-                force=body.force,
+                force=body.force, mode=body.mode,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -589,6 +683,7 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
                 style_id, tones=body.tones or None, views=body.views or None,
                 force=body.force, note=body.note,
                 confirmed_max_usd=body.confirm_max_usd,
+                mode=body.mode,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -690,6 +785,7 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
     async def correct_task(task_id: str, request: Request,
                            correction: str = Form(..., min_length=4, max_length=2000),
                            owner_override: str = Form(""),
+                           detail_nails: str = Form(""),
                            file: UploadFile | None = File(None)):  # noqa: B008 - FastAPI idiom
         """SOP v2+: locked-base local edit with an explicit correction; optional
         single-nail detail reference attached as the final image."""
@@ -707,7 +803,10 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         try:
             task = service.create_correction(
                 task_id, correction_text=correction,
-                detail_references=details, owner_override=owner_override,
+                detail_references=details,
+                detail_nails=[item.strip() for item in detail_nails.split(",")
+                              if item.strip()],
+                owner_override=owner_override,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

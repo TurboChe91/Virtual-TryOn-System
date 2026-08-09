@@ -12,6 +12,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY lunelle/ lunelle/
 COPY pyproject.toml .
 
+# The image carries lunelle/ but not .git, so `git rev-parse` cannot run inside the
+# container. Bake the SHA at build time instead:
+#   docker build --build-arg LUNELLE_BUILD_GIT_SHA="$(git rev-parse HEAD)" .
+# Without it, executions record git_sha=NULL. That is honest but unhelpful --
+# runtime_tree_sha still identifies the code, this only restores the readable label.
+ARG LUNELLE_BUILD_GIT_SHA=""
+ENV LUNELLE_BUILD_GIT_SHA=${LUNELLE_BUILD_GIT_SHA}
+
 # Non-root runtime user; /data holds all persistent state (mount a volume).
 RUN useradd --create-home --uid 10001 lunelle \
     && mkdir -p /data && chown -R lunelle:lunelle /data /app

@@ -139,6 +139,10 @@ class GenerateRequest(BaseModel):
         description="create a new generation version even if one already exists/succeeded",
     )
     note: str = Field(default="", max_length=200)
+    mode: Literal["batch", "precision"] | None = Field(
+        default=None,
+        description="defaults to precision for Hero and batch for other outputs",
+    )
 
     @field_validator("output_types")
     @classmethod
@@ -170,6 +174,7 @@ class MatrixRequest(BaseModel):
     views: list[str] = Field(default_factory=list)
     force: bool = False
     note: str = Field(default="", max_length=200)
+    mode: Literal["batch", "precision"] = "batch"
     confirm_max_usd: float | None = Field(
         default=None, ge=0, le=100000,
         description="Echo back confirm_max_usd (the WORST-case ceiling) from "
@@ -202,6 +207,33 @@ class IdentityRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     identity_text: str = Field(default="", max_length=8000)
+
+
+class CropBox(BaseModel):
+    """One reviewed pixel-space crop against the current source plan."""
+
+    model_config = ConfigDict(extra="forbid")
+    nail_id: str = Field(pattern=r"^nail-(0[1-9]|10)$")
+    bbox: tuple[int, int, int, int]
+
+
+class ManualSplitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    boxes: list[CropBox] = Field(min_length=10, max_length=10)
+
+    @field_validator("boxes")
+    @classmethod
+    def _all_nails_once(cls, boxes: list[CropBox]) -> list[CropBox]:
+        ids = [box.nail_id for box in boxes]
+        expected = {f"nail-{number:02d}" for number in range(1, 11)}
+        if len(set(ids)) != 10 or set(ids) != expected:
+            raise ValueError("boxes must contain nail-01 through nail-10 exactly once")
+        return boxes
+
+
+class SplitReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    approved: bool
 
 
 class ProfileCreateRequest(BaseModel):

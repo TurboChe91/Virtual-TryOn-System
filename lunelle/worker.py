@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .assets import describe_inputs
@@ -28,13 +29,24 @@ from .budget import (
     settle_spend,
     sync_lineage_spend,
 )
+from .build import describe as describe_build
+from .build import detect_drift, drift_allowed, stamp
 from .config import Config
 from .db import Database
-from .geometry import size_from_reference
+from .inputs import (
+    DEFERRABLE_ROLES,
+    InputUnavailable,
+    ResolvedInputs,
+    channel_fingerprint,
+    compare_to_snapshot,
+    load_all,
+    request_manifest,
+)
 from .logging_setup import task_logger
 from .models import (
     ERROR_BUDGET_EXCEEDED,
     ERROR_DEPENDENCY_MISSING,
+    ERROR_SNAPSHOT_MISMATCH,
     OUTPUT_GRID,
     OUTPUT_HERO,
     OUTPUT_MATRIX_CELL,
@@ -42,13 +54,16 @@ from .models import (
     QA_ERROR,
     QA_RUNNING,
 )
-from .nailslots import NAIL_ANATOMY
-from .planview import PlanError, compile_view_plan
 from .profiles import ProviderResolver
-from .prompts import matrix_view_plan_rows, matrix_visible_nails, strip_reference_block
+from .prompts import matrix_visible_nails, strip_reference_block
 from .providers import GenerationRequest, ImageProvider, ProviderError
 from .qa import run_qa, store_qa_result
-from .snapshots import record_execution
+from .snapshots import (
+    SNAPSHOT_VERSION,
+    get_snapshot,
+    profile_snapshot,
+    record_execution,
+)
 from .tasks import TaskService
 
 logger = logging.getLogger(__name__)
@@ -60,6 +75,31 @@ class DependencyMissing(Exception):
     """A required input asset is absent, so the task must not call the provider."""
 
 
+class SnapshotMismatch(Exception):
+    """The request does not match the snapshot, so the provider must not be called."""
+
+
+@dataclass(frozen=True)
+class ExecutionPlan:
+    """One attempt's inputs, all of them from the snapshot.
+
+    Exists so the prompt, size and images cannot come from different places. They
+    used to: the prompt from `tasks.prompt`, the size recomputed from current
+    settings, the images re-resolved from the current style row — three sources for
+    one request, none compared against the plan.
+    """
+
+    snapshot: dict
+    fingerprint: str
+    prompt: str
+    negative_prompt: str
+    size: tuple[int, int]
+    inputs: ResolvedInputs
+    #: Roles resolved at execution time because they cannot exist at queue time.
+    #: Compared by role and position only — there is no frozen digest for them.
+    deferred_roles: set[str] = field(default_factory=set)
+
+
 class Worker:
     def __init__(self, config: Config, db: Database, service: TaskService, provider: ImageProvider):
         self.config = config
@@ -69,6 +109,11 @@ class Worker:
         self.resolver = ProviderResolver(config, db, provider)
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        #: Set once drift is seen, and never cleared. A process whose tree changed
+        #: has already loaded some modules from the old tree and may lazily import
+        #: others from the new one, so it is a mixture no record can describe.
+        #: Reverting the file does not undo that; only a restart does.
+        self._drift_halted = False
 
     # ---------------- lifecycle ----------------
 
@@ -84,7 +129,17 @@ class Worker:
             thread = threading.Thread(target=self._loop, name=f"lunelle-worker-{index}", daemon=True)
             thread.start()
             self._threads.append(thread)
-        logger.info("worker started with %d thread(s)", len(self._threads))
+        build = describe_build()
+        logger.info(
+            "worker started with %d thread(s) on build %s (tree %s, git %s%s)",
+            len(self._threads), build["build_id"], build["runtime_tree_sha256"][:12],
+            (build["git_sha"] or "none")[:7], " dirty" if build["git_dirty"] else "",
+        )
+        # A process that starts with the tree already changed is stale from its
+        # first claim. Say so at startup rather than at the first paid call.
+        report = detect_drift(force=True)
+        if report.drifted:
+            self._note_drift(report)
 
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
@@ -105,8 +160,57 @@ class Worker:
 
     # ---------------- main loop ----------------
 
+    def _note_drift(self, report) -> None:
+        """Record and act on a divergence between the loaded build and the disk.
+
+        Refusing to claim is the whole point: on 2026-08-06 a stale process spent
+        $0.76 on four cells whose prompt described an image it never sent, and the
+        only reason anyone noticed was a manual `ps` against file mtimes. A worker
+        that stops claiming turns that into an operator restarting a server.
+        """
+        if self._drift_halted:
+            return
+        self._drift_halted = True
+        if drift_allowed():
+            logger.warning(
+                "runtime tree changed since this process loaded (%s); continuing "
+                "because %s=1 — executions will be recorded with "
+                "runtime_drift_detected=1",
+                report.summary(), "LUNELLE_ALLOW_CODE_DRIFT",
+            )
+            return
+        logger.error(
+            "runtime tree changed since this process loaded (%s); refusing to claim "
+            "further tasks. This process is running code that is no longer on disk: "
+            "Python does not reload, so anything it renders would be attributed to "
+            "the wrong build. Restart the service to pick up the change, or set "
+            "LUNELLE_ALLOW_CODE_DRIFT=1 for a development run.",
+            report.summary(),
+        )
+
+    def _may_claim(self) -> bool:
+        """False when this process must not take new work.
+
+        Checked BEFORE claiming rather than after: a task claimed and then abandoned
+        has to be transitioned back out of `running`, and the simplest way not to
+        need that is never to claim it.
+        """
+        if self._drift_halted:
+            return drift_allowed()
+        report = detect_drift()
+        if report.drifted:
+            self._note_drift(report)
+            return drift_allowed()
+        return True
+
     def _loop(self) -> None:
         while not self._stop.is_set():
+            if not self._may_claim():
+                # Idle rather than exit: the HTTP surface stays up, /ready reports
+                # degraded, and the operator gets a diagnosable server instead of a
+                # dead one.
+                self._stop.wait(5)
+                continue
             try:
                 task = self.service.claim_next()
             except Exception:  # noqa: BLE001 - claim must never kill the loop
@@ -137,6 +241,135 @@ class Worker:
 
     # ---------------- execution ----------------
 
+    def _load_execution_plan(self, task: dict, active_profile: dict | None,
+                             log) -> ExecutionPlan:
+        """Everything this attempt will send, read from the snapshot and verified.
+
+        This is the whole of C3. The worker used to re-derive its inputs here from
+        the current style row, `app_settings` and the viewplan cache directory, while
+        taking the prompt from the frozen `tasks.prompt` column. The two came from
+        different moments and nothing compared them, so a prompt describing captioned
+        tiles could ship with an uncaptioned image — which is what happened to four
+        cells on 2026-08-06, at $0.76, producing output that was evidence for
+        nothing.
+
+        Now: one source. The snapshot names each input by role and digest, the store
+        resolves it, and the bytes are re-hashed on the way in. Anything missing is a
+        blocked task, never a substituted input.
+        """
+        record = get_snapshot(self.db, task["task_id"])
+        if record is None:
+            raise DependencyMissing(
+                "this task has no input snapshot, so what it was queued to send "
+                "cannot be established; re-queue it"
+            )
+        snapshot = record["snapshot"]
+
+        # Both copies of the version are checked: the one inside the snapshot JSON
+        # (covered by the input fingerprint) and the denormalised column. A real v1
+        # row has both at 1; if they DISAGREE the record has been edited, which is
+        # itself a reason not to execute it.
+        versions = {snapshot.get("snapshot_version"), record.get("snapshot_version")}
+        if versions != {SNAPSHOT_VERSION}:
+            # A v1 snapshot tagged every input `kind` and none `role`, so which
+            # image was Image 1 is not recoverable from it. Guessing is what this
+            # work exists to stop.
+            found = ", ".join(str(v) for v in sorted(versions, key=str))
+            raise DependencyMissing(
+                f"this task's snapshot is version {found}, and executing it needs "
+                f"version {SNAPSHOT_VERSION} (inputs addressed by role and digest). "
+                f"Re-queue the task to freeze current inputs."
+            )
+
+        unresolved = snapshot.get("unresolved_inputs") or []
+        if unresolved:
+            reasons = "; ".join(
+                f"{entry.get('role', '?')}: {entry.get('reason', 'missing')}"
+                for entry in unresolved
+            )
+            raise DependencyMissing(f"inputs were missing when this task was queued — {reasons}")
+
+        # The channel is compared, not re-read into use. A profile row is edited in
+        # place, so the same profile_id can point at a different endpoint with a
+        # different key tomorrow; a queued task would then silently go somewhere its
+        # snapshot never described.
+        planned_channel = (snapshot.get("channel") or {}).get("channel_fingerprint")
+        current_channel = channel_fingerprint(profile_snapshot(
+            self.resolver.profiles.active_row()))
+        if planned_channel and planned_channel != current_channel:
+            raise DependencyMissing(
+                f"the API channel changed after this task was queued "
+                f"(queued against {planned_channel}, now {current_channel}). "
+                f"Model, endpoint or key differs, so this task would not run on the "
+                f"channel it was priced and planned for. Re-queue it."
+            )
+
+        try:
+            resolved = load_all(self.db, snapshot.get("input_assets") or [])
+        except InputUnavailable as exc:
+            raise DependencyMissing(str(exc)) from exc
+
+        # The one input that genuinely cannot be frozen: a wearing shot copies the
+        # grid generated later in the same batch. Declared in the snapshot, resolved
+        # here, and recorded in the manifest.
+        deferred_roles: set[str] = set()
+        for entry in snapshot.get("deferred_inputs") or []:
+            role = entry.get("role", "")
+            if role not in DEFERRABLE_ROLES:
+                raise DependencyMissing(
+                    f"snapshot defers input {role!r}, which must be frozen at queue "
+                    f"time; re-queue this task"
+                )
+            grid = self._latest_grid_path(task)
+            if grid is not None:
+                resolved.append(role, grid)
+                deferred_roles.add(role)
+            else:
+                log.info("no successful grid available; proceeding without it",
+                         ctx={"stage": "reference"})
+
+        size = snapshot.get("size") or list(self.config.wearing_size)
+        return ExecutionPlan(
+            snapshot=snapshot,
+            fingerprint=record["input_fingerprint"],
+            prompt=snapshot.get("prompt") or "",
+            negative_prompt=snapshot.get("negative_prompt") or "",
+            size=(int(size[0]), int(size[1])),
+            inputs=resolved,
+            deferred_roles=deferred_roles,
+        )
+
+    def _record_execution(self, task: dict, attempt_no: int, references: list[Path],
+                          prompt: str, provider, manifest: dict,
+                          plan: ExecutionPlan, *, matches: bool) -> None:
+        """Persist the measured request. Never allowed to break generation."""
+        try:
+            record_execution(
+                self.db, task["task_id"], attempt_no,
+                resolved_assets=describe_inputs(self.db, self.config, references,
+                                                kind="reference"),
+                prompt_sent=prompt, model=task["model"], provider=provider.name,
+                # Which code is sending this, and whether the tree had already moved
+                # underneath it. Recorded before the call, like everything else here.
+                build=stamp(
+                    worker_instance=threading.current_thread().name,
+                    drift=detect_drift(),
+                ),
+                request=manifest,
+                snapshot_fingerprint=plan.fingerprint,
+                matches_snapshot=matches,
+            )
+        except Exception:  # noqa: BLE001 - provenance must not block generation
+            logger.exception("could not record execution provenance for %s",
+                             task["task_id"])
+
+    def _latest_grid_path(self, task: dict) -> Path | None:
+        grid_task = self.service.latest_successful_grid(task["style_id"])
+        if not grid_task or not grid_task.get("output_path"):
+            return None
+        path = Path(grid_task["output_path"])
+        return path if path.is_file() else None
+
     def _execute(self, task: dict) -> None:
         provider, active_profile = self.resolver.resolve()
         log = task_logger(
@@ -150,7 +383,7 @@ class Worker:
             model=task["model"],
         )
         try:
-            references = self._resolve_references(task, log)
+            plan = self._load_execution_plan(task, active_profile, log)
         except DependencyMissing as exc:
             # Fail fast BEFORE the provider call: a matrix cell without its hand
             # model would render an unusable, off-pose image at full price and
@@ -162,37 +395,30 @@ class Worker:
                 error_message=str(exc), retryable=False,
             )
             return
-        if task["metadata"].get("correction_of"):
-            # SOP v2+: previous candidate rides after the authority images as the
-            # locked edit base, then any single-nail detail references.
-            try:
-                source = self.service.get_task(task["metadata"]["correction_of"],
-                                               with_details=False)
-                previous = Path(source.get("output_path") or "")
-                if previous.is_file():
-                    references.append(previous)
-                else:
-                    log.warning("correction base image missing on disk",
-                                ctx={"stage": "reference"})
-            except Exception:  # noqa: BLE001 - degraded correction beats a crash
-                log.warning("correction source task unavailable", ctx={"stage": "reference"})
-            for detail in task["metadata"].get("correction_details", []):
-                detail_path = Path(detail)
-                if detail_path.is_file():
-                    references.append(detail_path)
-        prompt = task["prompt"]
+        resolved = plan.inputs
+        references = resolved.paths
+        prompt = plan.prompt
         expected_reference = (
             task["metadata"].get("use_reference")
             or task["metadata"].get("use_style_reference")
             or task["metadata"].get("use_hero_reference")
             or task["metadata"].get("use_matrix_reference")
         )
+        prompt_transform = "none"
         if expected_reference and not references:
             # Text-only fallback: the stored prompt must not claim an Image 1 exists.
+            # Only reachable for a genuinely deferred input (a wearing shot whose grid
+            # does not exist yet); a matrix cell with no inputs is blocked above,
+            # never degraded.
+            #
+            # DECLARED rather than silently allowed. The verifier re-applies this
+            # exact transform to the snapshot's own prompt and compares hashes, so
+            # naming a transform cannot excuse an arbitrary prompt.
             prompt = strip_reference_block(prompt)
+            prompt_transform = "strip_reference_block"
             log.info("reference unavailable; stripped reference block from prompt",
                      ctx={"stage": "reference"})
-        size = self._size_for(task["output_type"], task)
+        size = plan.size
         extra: dict[str, str] = {}
         if task["output_type"] == OUTPUT_HERO and task["model"].startswith("gpt-image"):
             # Listing heroes are final assets; draft tiers are chosen per profile model.
@@ -240,19 +466,45 @@ class Worker:
             )
             return
 
-        # Record what is actually going out, before it goes. The plan lives in the
-        # snapshot; this is the observation, and the two legitimately differ (a
-        # missing reference strips the prompt's reference block).
-        try:
-            record_execution(
-                self.db, task["task_id"], attempt_no,
-                resolved_assets=describe_inputs(self.db, self.config, references,
-                                                kind="reference"),
-                prompt_sent=prompt, model=task["model"], provider=provider.name,
+        # Measure what is actually going out, from the bytes themselves. Built by
+        # re-hashing each file at this boundary rather than by copying the snapshot's
+        # digests forward — copying would make the comparison below prove only that
+        # the snapshot equals itself.
+        manifest = request_manifest(
+            prompt=prompt, negative_prompt=task["negative_prompt"], size=size,
+            model=task["model"], provider=provider.name, resolved=resolved,
+            channel=channel_fingerprint(active_profile),
+            prompt_transform=prompt_transform,
+        )
+        differences = compare_to_snapshot(plan.snapshot, manifest)
+        # Written BEFORE the call either way: a blocked attempt is a record worth
+        # keeping, and a crash mid-flight still leaves what went out.
+        self._record_execution(task, attempt_no, references, prompt, provider,
+                               manifest, plan, matches=not differences)
+        if differences:
+            # The precondition for spending money is that the plan and the request
+            # are the same thing. They were not, so nothing is sent.
+            detail = "; ".join(differences)
+            log.error("request does not match the snapshot; refusing to call the provider",
+                      ctx={"stage": "verify", "error_code": ERROR_SNAPSHOT_MISMATCH,
+                           "status": detail[:200]})
+            release_spend(self.db, task_id=task["task_id"], attempt_no=attempt_no)
+            sync_lineage_spend(self.db, root_task_id)
+            self.service.finish_attempt(
+                task["task_id"], attempt_no, outcome="error", duration_ms=0,
+                error_code=ERROR_SNAPSHOT_MISMATCH, error_message=detail,
+                reference_used=bool(references),
             )
-        except Exception:  # noqa: BLE001 - provenance must not block generation
-            logger.exception("could not record execution provenance for %s",
-                             task["task_id"])
+            self.service.complete_failure(
+                task["task_id"], error_code=ERROR_SNAPSHOT_MISMATCH,
+                error_message=(
+                    f"what this attempt would send does not match what the task was "
+                    f"queued to send: {detail}. Nothing was sent. Re-queue the task "
+                    f"to freeze current inputs."
+                ),
+                retryable=False,
+            )
+            return
 
         started = time.monotonic()
         try:
@@ -361,7 +613,12 @@ class Worker:
             if not qa_doc["passed"]:
                 self._maybe_auto_regen(task, qa_doc, log)
             else:
-                self._maybe_llm_qa(task, output_path, log)
+                # `resolved` — the exact inputs the provider received. QA used to
+                # re-read style.plan_image_path and re-resolve the hand model, so it
+                # judged the candidate against images the provider never saw: it
+                # scored tk_47e7d1a54d 100 while the actual placement was 6/10,
+                # because it was reading the uncaptioned plan.
+                self._maybe_llm_qa(task, output_path, resolved, log)
         except Exception:  # noqa: BLE001 - QA is advisory
             log.warning("qa run crashed; result not recorded", ctx={"stage": "qa"})
             logger.exception("qa failure detail")
@@ -399,7 +656,10 @@ class Worker:
                 continue
             try:
                 task = self.service.get_task(task_id, with_details=False)
-                size = self._size_for(task["output_type"], task)
+                # The size the task was QUEUED to request, from its snapshot.
+                # Recomputing it from current settings meant the aspect-ratio check
+                # could be run against a size the attempt never asked for.
+                size = self._snapshot_size(task)
                 grid_path = None
                 if task["output_type"] == OUTPUT_WEARING:
                     grid_task = self.service.latest_successful_grid(task["style_id"])
@@ -432,7 +692,8 @@ class Worker:
             logger.warning("qa recovery summary: %s", summary)
         return summary
 
-    def _maybe_llm_qa(self, task: dict, output_path: Path, log) -> None:
+    def _maybe_llm_qa(self, task: dict, output_path: Path,
+                      resolved: ResolvedInputs, log) -> None:
         """Advisory vision-LLM check: verifies per-nail identity and, on failure,
         writes the correction and queues the next version itself (bounded by
         auto_regen_max on the correction depth).
@@ -451,23 +712,26 @@ class Worker:
             return  # heuristic QA + human review remain the gate
         style = self.service.get_style(task["style_id"])
         images = [output_path]
-        for key in ("plan_image_path", "reference_image_path"):
-            candidate = Path(style.get(key) or "")
-            if candidate.is_file():
-                images.append(candidate)
-                break
-        # For a cell, the base hand photo goes in as Image 3: without it the judge
+        # Image 2 = the design authority THE PROVIDER RECEIVED, by role. Re-reading
+        # style.plan_image_path here is what made the judge's verdict unusable as
+        # evidence: it graded a candidate against a plan with no captions while the
+        # provider had been sent a captioned view-plan (or, on 2026-08-06, the
+        # reverse). Same bytes for both, or the verdict means nothing.
+        authority = resolved.first("view_plan", "design_plan", "grid", "style_reference")
+        if authority is not None:
+            images.append(authority)
+        # Image 3 = the immutable base hand photo, also as sent. Without it the judge
         # cannot see that the hand was stretched, which is the one defect a human
-        # spots instantly. Only this view's nails are in frame, so pass that list
-        # too rather than letting the judge assume 10.
+        # spots instantly. Only this view's nails are in frame, so pass that list too
+        # rather than letting the judge assume 10.
         visible_nails: list[str] | None = None
         if task["output_type"] == OUTPUT_MATRIX_CELL:
             metadata = task.get("metadata") or {}
-            tone, view = metadata.get("tone"), metadata.get("view")
-            if tone and view:
-                hand = self._hand_model_for(tone, view)
-                if hand is not None:
-                    images.append(hand)
+            view = metadata.get("view")
+            base_hand = resolved.first("base_hand")
+            if base_hand is not None:
+                images.append(base_hand)
+            if view:
                 visible_nails = matrix_visible_nails(view)
         try:
             verdict = auto_qa_verdict(chat, images, style.get("identity_text") or "",
@@ -512,6 +776,13 @@ class Worker:
         """
         if not self.config.automatic_work_enabled:
             return
+        policy = task.get("metadata", {}).get("generation_policy") or {}
+        if policy.get("allow_automatic_creative_repair") is False:
+            log.info(
+                "automatic creative repair disabled by Precision policy",
+                ctx={"stage": "qa", "status": f"{kind}:manual_control"},
+            )
+            return
         root_task_id = task.get("root_task_id") or task["task_id"]
         estimated = float(task.get("estimated_cost_usd") or 0.0)
         try:
@@ -539,6 +810,7 @@ class Worker:
                     # what makes a re-roll chain reconstructible.
                     parent_task_id=task["task_id"],
                     lineage_reason="auto_regeneration",
+                    mode=task.get("metadata", {}).get("generation_mode"),
                 )
                 queued = [created["task_id"] for created in plan.created]
             for task_id in queued:
@@ -558,180 +830,25 @@ class Worker:
             # thing this budget exists to prevent.
             logger.exception("automatic %s scheduling failed after claiming a slot", kind)
 
-    def _size_for(self, output_type: str, task: dict | None = None) -> tuple[int, int]:
-        if output_type == OUTPUT_GRID:
-            return self.config.grid_size
-        if output_type == OUTPUT_HERO:
-            return self.config.hero_size
-        if output_type == OUTPUT_MATRIX_CELL and task is not None:
-            # A cell must come out the shape of its base hand photo. Asking for a
-            # square against a 4:3 base stretched the hand on every cell, because
-            # `size` is a hard API constraint and "match the crop" is only prose.
-            metadata = task.get("metadata") or {}
-            tone, view = metadata.get("tone"), metadata.get("view")
-            if tone and view:
-                hand = self._hand_model_for(tone, view)
-                if hand is not None:
-                    derived = size_from_reference(hand)
-                    if derived is not None:
-                        return derived
-        return self.config.wearing_size
+    def _snapshot_size(self, task: dict) -> tuple[int, int]:
+        """The size this task was queued to request.
 
-    def _hand_model_for(self, tone: str, view: str) -> Path | None:
-        """Cell base photo: exact tone+view asset, else the tone-level legacy one."""
-        conn = self.db.conn()
-        for key in (f"hand_model_{tone}_{view}", f"hand_model_{tone}"):
-            row = conn.execute(
-                "SELECT value FROM app_settings WHERE key = ?", (key,)
-            ).fetchone()
-            if row is not None:
-                path = Path(row["value"])
-                if path.is_file():
-                    return path
-        return None
-
-    def _design_authority_for(self, style: dict) -> tuple[Path, str] | None:
-        """The design authority and which source it came from.
-
-        Returns (path, source) where source is "plan" or "grid". The caller needs
-        the distinction: an uploaded plan is the operator's actual design, whereas
-        a grid is an image this system generated earlier. Copying from a generated
-        grid compounds its errors into every downstream cell, and because it used
-        to happen silently there was no way to tell the two apart after the fact.
+        The only size the worker consults. It used to derive one here from the
+        current `app_settings` hand model, so replacing a hand model changed the size
+        an already-queued cell would request while the snapshot said otherwise. The
+        configured fallback covers a task with no snapshot, which cannot execute
+        anyway — `_load_execution_plan` blocks it.
         """
-        plan = Path(style.get("plan_image_path") or "")
-        if plan.is_file():
-            return plan, "plan"
-        grid_task = self.service.latest_successful_grid(style["style_id"])
-        if grid_task and grid_task.get("output_path"):
-            grid_path = Path(grid_task["output_path"])
-            if grid_path.is_file():
-                return grid_path, "grid"
-        return None
-
-    def _resolve_references(self, task: dict, log) -> list[Path]:
-        if task["output_type"] == OUTPUT_HERO:
-            return self._resolve_hero_references(task, log)
-        if task["output_type"] == OUTPUT_MATRIX_CELL:
-            return self._resolve_matrix_references(task, log)
+        record = get_snapshot(self.db, task["task_id"])
+        if record:
+            size = record["snapshot"].get("size")
+            if isinstance(size, list) and len(size) == 2:
+                return int(size[0]), int(size[1])
         if task["output_type"] == OUTPUT_GRID:
-            if not task["metadata"].get("use_style_reference"):
-                return []
-            ref = Path(task["metadata"].get("style_reference_path", ""))
-            if ref.is_file():
-                return [ref]
-            log.warning("uploaded style reference missing on disk; text-only grid",
-                        ctx={"stage": "reference"})
-            return []
-        if task["output_type"] != OUTPUT_WEARING or not task["metadata"].get("use_reference"):
-            return []
-        grid_task = self.service.latest_successful_grid(task["style_id"])
-        if not grid_task or not grid_task.get("output_path"):
-            log.info("no successful grid available; generating wearing shot text-only",
-                     ctx={"stage": "reference"})
-            return []
-        grid_path = Path(grid_task["output_path"])
-        if not grid_path.is_file():
-            log.warning("grid output file missing on disk; text-only fallback",
-                        ctx={"stage": "reference"})
-            return []
-        return [grid_path]
-
-    def _resolve_hero_references(self, task: dict, log) -> list[Path]:
-        """Image 1 = uploaded plan (or the latest grid), Image 2 = photo reference."""
-        if not task["metadata"].get("use_hero_reference"):
-            return []
-        style = self.service.get_style(task["style_id"])
-        resolved = self._design_authority_for(style)
-        if resolved is None:
-            log.info("no plan image or grid available; generating hero text-only",
-                     ctx={"stage": "reference"})
-            return []
-        plan, source = resolved
-        if source == "grid":
-            log.warning("hero using a generated grid as design authority; "
-                        "upload a plan image for a faithful render",
-                        ctx={"stage": "reference", "authority": source})
-        references = [plan]
-        photo_ref = Path(style.get("reference_image_path") or "")
-        if photo_ref.is_file():
-            references.append(photo_ref)
-        return references
-
-    def _resolve_matrix_references(self, task: dict, log) -> list[Path]:
-        """Image 1 = design authority compiled into this view's order, Image 2 = hand.
-
-        Both are hard requirements. A try-on cell rendered without its base hand
-        photo cannot match the pose, skin tone, or crop of the rest of the
-        matrix, so it is worthless as a published asset — raising here blocks the
-        task instead of billing for an image nobody can use.
-
-        The design authority must be an uploaded plan. A generated grid is accepted
-        everywhere else, but not here: a matrix cell copies its nail art per finger,
-        so basing it on an image this system generated bakes that image's drift into
-        all sixteen cells, and the result is indistinguishable from a faithful one
-        without reading the logs. Blocking follows the same rule as a missing hand
-        model — refuse rather than silently degrade.
-
-        Image 1 is the plan recompiled into this view's screen order rather than the
-        raw 2x5 plan. Prose placement ("screen left-to-right = nail-05, nail-04, ...")
-        asks the model to infer handedness and count fingers, and masked per-nail
-        editing — the obvious alternative — was measured on this channel and does not
-        work: asked to repaint nail-01 (left thumb, centroid x=44.7%, y=71.6%) the
-        model painted the right index finger (x=56.1%, y=42.8%). So the ordering has
-        to be carried by the image the model copies from. If compilation fails the
-        raw plan is still used: a cell with correct art in an uncertain order beats a
-        blocked cell, and the QA judge already reads order.
-        """
-        if not task["metadata"].get("use_matrix_reference"):
-            return []
-        tone = task["metadata"].get("tone", "")
-        view = task["metadata"].get("view", "")
-        style = self.service.get_style(task["style_id"])
-        resolved = self._design_authority_for(style)
-        if resolved is None:
-            raise DependencyMissing(
-                "no design authority for this style: upload the style's plan image "
-                "before queueing the try-on matrix"
-            )
-        plan, source = resolved
-        if source != "plan":
-            raise DependencyMissing(
-                "this style has no uploaded plan image; the only design authority "
-                "available is a previously generated grid, which would make every "
-                "cell a copy of a generated image. Upload the plan image on the "
-                "style page, then retry this cell"
-            )
-        hand = self._hand_model_for(tone, view)
-        if hand is None:
-            raise DependencyMissing(
-                f"no hand model configured for tone={tone!r} view={view!r}: "
-                "upload it on the settings page, then retry this cell"
-            )
-        return [self._view_plan_for(plan, view, log), hand]
-
-    def _view_plan_for(self, plan: Path, view: str, log) -> Path:
-        """The plan recompiled into `view`'s screen order, or the raw plan on failure."""
-        rows = matrix_view_plan_rows(view)
-        if not rows:
-            log.warning("no screen_slots for this view; using the raw plan",
-                        ctx={"stage": "reference", "view": view})
-            return plan
-        try:
-            compiled = compile_view_plan(
-                plan, view, rows=rows, anatomy=NAIL_ANATOMY,
-                cache_dir=self.config.asset_dir / "viewplans",
-            )
-        except (PlanError, OSError) as exc:
-            # Detection needs a 2x5 grid on a plain background. An unusual plan photo
-            # is an operator-fixable input problem, not a reason to block the cell.
-            log.warning("view-plan compilation failed; using the raw plan",
-                        ctx={"stage": "reference", "view": view, "status": str(exc)})
-            return plan
-        log.info("view-plan compiled for this cell",
-                 ctx={"stage": "reference", "view": view})
-        return compiled
-
+            return self.config.grid_size
+        if task["output_type"] == OUTPUT_HERO:
+            return self.config.hero_size
+        return self.config.wearing_size
 
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

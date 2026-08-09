@@ -200,6 +200,12 @@ class Config:
                 "LUNELLE_ADMIN_TOKEN is required in production; without it all "
                 "mutating (cost-incurring) endpoints would be unauthenticated."
             )
+        if self.is_production and os.environ.get("LUNELLE_ALLOW_CODE_DRIFT", "0") == "1":
+            problems.append(
+                "LUNELLE_ALLOW_CODE_DRIFT=1 is refused in production: it lets a "
+                "process keep billing for images after its code has been changed "
+                "on disk, which is how a run becomes unattributable to any build."
+            )
         if self.is_production and self.allow_private_api_hosts:
             problems.append(
                 "LUNELLE_ALLOW_PRIVATE_API_HOSTS=1 is refused in production: it "

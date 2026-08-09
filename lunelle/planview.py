@@ -277,6 +277,128 @@ def build_view_plan(plan: Path, rows: list[tuple[str, list[str]]], *,
     return buffer.getvalue()
 
 
+def build_spatial_view_plan(
+    plan: Path,
+    *,
+    visible_nails: list[str],
+    pose_map: dict[str, dict],
+    anatomy: dict[str, tuple[str, str]],
+    title: str,
+    cells: dict[str, tuple[int, int, int, int]] | None = None,
+    canvas_size: tuple[int, int] = (1536, 1024),
+) -> bytes:
+    """Compile plan crops into the target pose's spatial locations and rotations.
+
+    The row compiler above removes left/right ordering inference. This compiler
+    goes one step further: the contract supplies normalized target coordinates and
+    rotations, so the provider no longer has to infer the mapping between a row of
+    tiles and fingers in a photographed pose. Labels remain redundant safeguards;
+    spatial placement is the primary contract.
+
+    ``cells`` is the seam for a reviewed manual split revision. When omitted the
+    current deterministic detector is used exactly once.
+    """
+    if not visible_nails:
+        raise PlanError("spatial view-plan needs at least one nail")
+    duplicated = sorted({n for n in visible_nails if visible_nails.count(n) > 1})
+    if duplicated:
+        raise PlanError(f"spatial view-plan repeats nails: {duplicated}")
+    unknown = sorted(set(visible_nails) - set(PLAN_CELLS))
+    if unknown:
+        raise PlanError(f"spatial view-plan references unknown nails: {unknown}")
+    missing_pose = sorted(set(visible_nails) - set(pose_map))
+    extra_pose = sorted(set(pose_map) - set(visible_nails))
+    if missing_pose or extra_pose:
+        raise PlanError(
+            f"pose_map mismatch: missing={missing_pose or 'none'}, "
+            f"extra={extra_pose or 'none'}"
+        )
+
+    width, height = canvas_size
+    if width < 640 or height < 480:
+        raise PlanError("spatial view-plan canvas must be at least 640x480")
+    boxes = cells if cells is not None else detect_cells(plan)
+    if set(visible_nails) - set(boxes):
+        raise PlanError("reviewed split does not contain every visible nail")
+
+    canvas = Image.new("RGB", canvas_size, (255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
+    title_font, id_font, role_font = _font(32), _font(22), _font(16)
+    blue, dark, grey = (0, 145, 255), (20, 20, 20), (85, 85, 85)
+    draw.text((width // 2, 28), title, fill=dark, font=title_font, anchor="ma")
+    draw.text(
+        (width // 2, 72),
+        "POSITION + ROTATION ARE AUTHORITATIVE · LABELS/BOXES ARE NOT OUTPUT",
+        fill=grey,
+        font=role_font,
+        anchor="ma",
+    )
+
+    # Five-nail views have room for larger references. In ten-nail views, the
+    # upper slots are intentionally narrow enough not to overlap at 9% spacing.
+    vertical_size = (208, 300) if len(visible_nails) <= 5 else (112, 230)
+    for nail_id in visible_nails:
+        pose = pose_map[nail_id]
+        try:
+            x = float(pose["x"])
+            y = float(pose["y"])
+            rotation = float(pose.get("rotation_ccw", 0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PlanError(f"invalid pose_map entry for {nail_id}") from exc
+        if not 0.04 <= x <= 0.96 or not 0.12 <= y <= 0.90:
+            raise PlanError(f"{nail_id} pose coordinate ({x}, {y}) is outside the canvas")
+
+        cell = crop_cell(plan, nail_id, upscale_to=720, cells=boxes)
+        if rotation:
+            cell = cell.rotate(
+                rotation,
+                resample=Image.Resampling.BICUBIC,
+                expand=True,
+                fillcolor=(255, 255, 255),
+            )
+        horizontal = 45 <= abs(rotation) % 180 <= 135
+        tile_w, tile_h = vertical_size[::-1] if horizontal else vertical_size
+        scale = min((tile_w - 16) / cell.width, (tile_h - 16) / cell.height)
+        sized = cell.resize(
+            (max(1, round(cell.width * scale)), max(1, round(cell.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        centre_x, centre_y = round(x * width), round(y * height)
+        left, top = centre_x - tile_w // 2, centre_y - tile_h // 2
+        draw.rounded_rectangle(
+            (left, top, left + tile_w, top + tile_h), radius=12, outline=blue, width=3
+        )
+        canvas.paste(
+            sized,
+            (centre_x - sized.width // 2, centre_y - sized.height // 2),
+        )
+
+        label_y = top - 8 if y > 0.52 else top + tile_h + 8
+        anchor = "ms" if y > 0.52 else "ma"
+        draw.text((centre_x, label_y), nail_id, fill=dark, font=id_font, anchor=anchor)
+        anatomy_text = " · ".join(anatomy[nail_id]).upper()
+        direction = str(pose.get("fingertip", "unspecified")).upper()
+        role_y = label_y - 25 if y > 0.52 else label_y + 25
+        draw.text(
+            (centre_x, role_y),
+            f"{anatomy_text} · TIP {direction}",
+            fill=grey,
+            font=role_font,
+            anchor=anchor,
+        )
+
+    draw.text(
+        (width // 2, height - 22),
+        "COPY NAIL ART ONLY · DO NOT RENDER THIS GUIDE",
+        fill=grey,
+        font=role_font,
+        anchor="ms",
+    )
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
+
+
 def view_plan_digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 

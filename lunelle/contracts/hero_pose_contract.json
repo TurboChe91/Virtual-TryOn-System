@@ -26,6 +26,18 @@
     "left_hand_screen_order": ["nail-01", "nail-02", "nail-03", "nail-04", "nail-05"],
     "right_hand_screen_order": ["nail-10", "nail-09", "nail-08", "nail-07", "nail-06"]
   },
+  "pose_map": {
+    "nail-02": {"x": 0.15, "y": 0.30, "rotation_ccw": 0, "fingertip": "up"},
+    "nail-03": {"x": 0.24, "y": 0.28, "rotation_ccw": 0, "fingertip": "up"},
+    "nail-04": {"x": 0.33, "y": 0.30, "rotation_ccw": 0, "fingertip": "up"},
+    "nail-05": {"x": 0.42, "y": 0.34, "rotation_ccw": 0, "fingertip": "up"},
+    "nail-10": {"x": 0.58, "y": 0.34, "rotation_ccw": 0, "fingertip": "up"},
+    "nail-09": {"x": 0.67, "y": 0.30, "rotation_ccw": 0, "fingertip": "up"},
+    "nail-08": {"x": 0.76, "y": 0.28, "rotation_ccw": 0, "fingertip": "up"},
+    "nail-07": {"x": 0.85, "y": 0.30, "rotation_ccw": 0, "fingertip": "up"},
+    "nail-01": {"x": 0.22, "y": 0.70, "rotation_ccw": 90, "fingertip": "left"},
+    "nail-06": {"x": 0.78, "y": 0.70, "rotation_ccw": -90, "fingertip": "right"}
+  },
   "pose": "Two complete hands displayed symmetrically with palms toward the camera and fingers gently curled so all ten nail faces are readable. The two pinkies face toward the center gap. Both thumbs sit lower and outside. Both wrists remain fully visible.",
   "background": "Matte cream draped-fabric curtain with soft vertical folds and no props or clutter.",
   "lighting": "Soft diffused professional studio light, natural light-skin texture and color, gentle contact shadows, no hard flash and no plastic over-smoothing.",

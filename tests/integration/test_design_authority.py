@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from lunelle.assets import digest_of_file
 from lunelle.providers.mock import MockImageProvider
 from tests.conftest import satisfy_matrix_dependencies
 
@@ -144,9 +145,21 @@ class TestImage1IsTheCompiledViewPlan:
         style_row = service.get_style(style["style_id"])
         assert image1 != Path(style_row["plan_image_path"]), \
             "the raw 2x5 plan carries no screen order"
-        assert image1.name.startswith("viewplan-")
-        assert "p2_open_hands" in image1.name, "the view-plan must match the cell's view"
         assert image1.is_file()
+        # Compiled view-plans now live in the content-addressed store, so the
+        # filename is the digest rather than "viewplan-<plan>-<view>". The snapshot
+        # is what says which view it was compiled for, and asserting on that is
+        # stronger than a filename convention: it is the record the worker read.
+        from lunelle.snapshots import get_snapshot
+
+        listed = service.list_tasks()[0]
+        task = service.get_task(listed["task_id"], with_details=False)
+        entry = get_snapshot(db, task["task_id"])["snapshot"]["input_assets"][0]
+        assert entry["role"] == "view_plan"
+        assert entry["derived_from"]["view"] == "p2_open_hands", \
+            "the view-plan must be compiled for the cell's own view"
+        assert entry["digest"] == digest_of_file(image1), \
+            "the image sent must be the exact bytes the snapshot froze"
 
     def test_each_view_gets_its_own_view_plan(self, config, db, service):
         """p2 and p4 disagree on left-hand screen order, so one image cannot serve both."""
@@ -177,13 +190,8 @@ class TestImage1IsTheCompiledViewPlan:
         first_images = {refs[0] for refs in provider.requested_references}
         assert len(first_images) == 1, "same view must reuse one compiled view-plan"
 
-    def test_undetectable_plan_falls_back_to_the_raw_plan(self, config, db, service):
-        """A flat plan photo is an operator input problem, not a reason to block.
-
-        The cell still has correct art and the QA judge already reads nail order, so
-        degrading beats refusing here — unlike a missing hand model, which makes the
-        output unusable in the matrix.
-        """
+    def test_undetectable_plan_is_blocked_for_manual_split(self, config, db, service):
+        """A raw-plan fallback would hand spatial mapping back to the model."""
         style = make_style(service, name="Flat", description="red square nails")
         satisfy_matrix_dependencies(db, config, service, style["style_id"],
                                     tones=["light"], views=["p5_left_hand"])
@@ -195,9 +203,12 @@ class TestImage1IsTheCompiledViewPlan:
         provider = MockImageProvider(allowed=True)
         run_worker_until_settled(config, db, service, provider)
 
-        assert provider.calls == 1, "an undetectable plan must not block the cell"
-        image1 = provider.requested_references[0][0]
-        assert image1 == Path(style_row["plan_image_path"])
+        assert provider.calls == 0
+        listed = service.list_tasks()[0]
+        task = service.get_task(listed["task_id"], with_details=False)
+        assert task["status"] == "failed"
+        assert task["error_code"] == "dependency_missing"
+        assert "manual split override" in task["error_message"]
 
 
 class TestSnapshotAgreesWithTheWorker:

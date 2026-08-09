@@ -166,10 +166,10 @@ _HERO_CONTRACT_TEXT = (
 )
 HERO_CONTRACT = json.loads(_HERO_CONTRACT_TEXT)
 HERO_CONTRACT_SHA = hashlib.sha256(_HERO_CONTRACT_TEXT.encode()).hexdigest()[:8]
-HERO_PROMPT_VERSION = f"hv-1+{HERO_CONTRACT_SHA}"
+HERO_PROMPT_VERSION = f"hv-2+{HERO_CONTRACT_SHA}"
 
 HERO_REFERENCE_BLOCK = """INPUT AUTHORITY — do not mix these roles:
-- Image 1 is the nail set plan. It is the ONLY authority for nail-art colors, textures, motifs, exact counts, 3D decorations, and each individual nail's length and silhouette. Its layout, spacing, labels, and background are packaging only; never render them.
+- Image 1 is the HERO VIEW PLAN. The ten nail crops have already been placed in their target pose locations and orientations. It is the ONLY authority for nail-art colors, textures, motifs, exact counts, 3D decorations, each individual nail's length and silhouette, AND which design belongs in each spatial slot. Copy the spatial mapping directly; do not count, mirror, reverse, or reassign nails. Its labels, boxes, arrows, and white background are annotation only; never render them.
 - Image 2 is the photography reference. It is the ONLY authority for hand pose, hand geometry, background, crop, lighting, and skin appearance. NEVER copy its manicure design, nail length, or nail silhouette.
 
 """
@@ -192,6 +192,15 @@ def _hero_view_contract() -> str:
             f"Framing: {HERO_CONTRACT['framing']}",
         ]
     )
+
+
+def hero_view_plan_spec() -> dict:
+    """Pose-shaped compiler inputs for Hero, copied out of the locked contract."""
+    return {
+        "visible_nails": list(HERO_CONTRACT["visible_nails"]),
+        "pose_map": dict(HERO_CONTRACT["pose_map"]),
+        "title": "HERO VIEW PLAN — COPY EACH DESIGN TO THIS SPATIAL SLOT",
+    }
 
 
 def build_hero_prompt(spec: StyleSpec, identity_text: str | None, with_reference: bool) -> str:
@@ -237,7 +246,7 @@ MATRIX_CONTRACT = json.loads(_MATRIX_CONTRACT_TEXT)
 MATRIX_TONES = tuple(MATRIX_CONTRACT["tones"])
 MATRIX_VIEWS = tuple(MATRIX_CONTRACT["views"])
 MATRIX_PROMPT_VERSION = (
-    "mx-2+" + hashlib.sha256(_MATRIX_CONTRACT_TEXT.encode()).hexdigest()[:8]
+    "mx-3+" + hashlib.sha256(_MATRIX_CONTRACT_TEXT.encode()).hexdigest()[:8]
 )
 
 MATRIX_REFERENCE_BLOCK = """INPUT AUTHORITY — do not mix these roles:
@@ -258,6 +267,18 @@ def matrix_visible_nails(view: str) -> list[str] | None:
         return None
     nails = view_doc.get("visible_nails")
     return list(nails) if nails else None
+
+
+def matrix_view_plan_spec(view: str) -> dict | None:
+    """Pose-shaped compiler inputs for one matrix view, or None if unknown."""
+    view_doc = MATRIX_CONTRACT["views"].get(view)
+    if not view_doc or not view_doc.get("pose_map"):
+        return None
+    return {
+        "visible_nails": list(view_doc["visible_nails"]),
+        "pose_map": dict(view_doc["pose_map"]),
+        "title": f"{view.upper()} VIEW PLAN — COPY EACH DESIGN TO THIS SPATIAL SLOT",
+    }
 
 
 def matrix_view_plan_rows(view: str) -> list[tuple[str, list[str]]] | None:
@@ -342,10 +363,20 @@ Hard constraints:
 # carry set-wide COUNT LOCKS ("exactly two gothic opals in the whole image") —
 # count locks are what stop collateral damage on untouched nails.
 
-def build_correction_prompt(base_prompt: str, correction_text: str, detail_count: int) -> str:
+def build_correction_prompt(
+    base_prompt: str,
+    correction_text: str,
+    detail_count: int,
+    detail_nails: list[str] | None = None,
+) -> str:
+    named = [name for name in (detail_nails or []) if name]
+    identity = (
+        " In attachment order they are: " + ", ".join(named) + "."
+        if named else ""
+    )
     detail_note = (
         f" After it come {detail_count} enlarged single-nail detail reference(s); "
-        "use each ONLY for its explicitly named correction slot."
+        f"use each ONLY for its explicitly named correction slot.{identity}"
         if detail_count else ""
     )
     header = f"""HIGHEST-PRIORITY ATTEMPT CORRECTION — this is a LOCAL EDIT, not a new generation:
