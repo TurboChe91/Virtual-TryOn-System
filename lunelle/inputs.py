@@ -79,8 +79,8 @@ ROLES = (
 )
 
 # Inputs a correction must inherit from the source snapshot, in the order in
-# which that snapshot froze them. Keeping this list role-based prevents a newly
-# appended correction_base from accidentally becoming Hero's Image 2.
+# which that snapshot froze them. They follow correction_base in a correction
+# request; keeping this list role-based prevents authority drift across versions.
 AUTHORITY_ROLES = frozenset({
     "view_plan",
     "design_plan",

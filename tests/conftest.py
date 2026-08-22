@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import faulthandler
 import os
+import socket
 import sys
 import threading
 import time
@@ -28,6 +29,40 @@ SESSION_TIMEOUT_S = int(os.environ.get("LUNELLE_TEST_TIMEOUT_S", "900"))
 
 #: Threads the worker creates, by name prefix (see Worker.start).
 WORKER_THREAD_PREFIX = "lunelle-worker-"
+
+
+@pytest.fixture(autouse=True)
+def _stable_documentation_domain_dns(monkeypatch: pytest.MonkeyPatch):
+    """Keep test-only domains deterministic under transparent DNS proxies.
+
+    Some development networks synthesize ``198.18.0.0/15`` answers for every
+    hostname, including RFC-reserved ``.invalid`` names and ``example.com``.
+    Lunelle must continue to reject those private/reserved answers in
+    production.  Tests that use documentation domains as inert placeholders,
+    however, should not depend on the host machine's DNS interception policy.
+
+    Individual tests can still monkeypatch ``getaddrinfo`` after this fixture to
+    exercise private, mixed, and rebinding responses explicitly.
+    """
+    real_getaddrinfo = socket.getaddrinfo
+
+    def stable_getaddrinfo(host, port, *args, **kwargs):
+        hostname = host.decode() if isinstance(host, bytes) else str(host)
+        if hostname == "example.com" or hostname.endswith(".example.com"):
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("93.184.216.34", port or 0),
+                )
+            ]
+        if hostname.endswith(".invalid"):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", stable_getaddrinfo)
 
 
 def pytest_configure(config: pytest.Config) -> None:

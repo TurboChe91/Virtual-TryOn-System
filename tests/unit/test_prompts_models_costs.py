@@ -4,7 +4,12 @@ import pytest
 
 from lunelle import models
 from lunelle.logging_setup import redact
-from lunelle.prompts import PROMPT_VERSION, build_prompt_bundle
+from lunelle.prompts import (
+    PROMPT_VERSION,
+    build_correction_prompt,
+    build_prompt_bundle,
+    correction_prompt_version,
+)
 from lunelle.schemas import StyleSpec
 from lunelle.tasks import TaskService
 
@@ -64,6 +69,17 @@ class TestPrompts:
         assert bundle.quality_requirements["grid"]["expected_size"] == "2048x2048"
         assert bundle.quality_requirements["wearing"]["expected_size"] == "1536x1024"
         assert bundle.prompt_version == PROMPT_VERSION
+
+    def test_correction_prepends_base_and_shifts_original_image_numbers(self):
+        corrected = build_correction_prompt(
+            "Image 1 is plan. IMAGE 2 is hand.", "Fix nail-07 only.", 0
+        )
+        assert "Image 1 is the PREVIOUS CANDIDATE" in corrected
+        assert "Image 2 is plan. IMAGE 3 is hand." in corrected
+
+    def test_correction_version_suffix_does_not_accumulate(self):
+        assert correction_prompt_version("hv-2+abc") == "hv-2+abc+cr-3"
+        assert correction_prompt_version("hv-2+abc+cr-2") == "hv-2+abc+cr-3"
 
 
 class TestStateMachine:

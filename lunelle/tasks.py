@@ -58,6 +58,7 @@ from .prompts import (
     build_correction_prompt,
     build_matrix_prompt,
     build_prompt_bundle,
+    correction_prompt_version,
     hero_view_plan_spec,
     matrix_view_plan_spec,
     prompt_for_output_type,
@@ -1234,7 +1235,6 @@ class TaskService:
             source["metadata"].get("generation_mode"), source["output_type"]
         ).as_dict()
         max_versions = int(policy.get("max_creative_versions", CORRECTION_BUDGET))
-        version = int(source["metadata"].get("version", 1)) + 1
         chain = self.db.conn().execute(
             "SELECT COUNT(*) AS n FROM tasks WHERE root_task_id = ?",
             (root_task_id,),
@@ -1245,6 +1245,10 @@ class TaskService:
                 f"candidate lineage); per SOP this candidate is BLOCKED pending owner review. "
                 f"Pass owner_override to continue."
             )
+        # Versions identify candidates across the whole workbench, not depth from
+        # the chosen parent. If an operator branches from v1 after v2 exists, the
+        # new candidate is v3 rather than a second ambiguous v2.
+        version = int(chain) + 1
 
         provider_name, model, price, profile_row = self._generation_channel_row()
         profile_name = profile_row["name"] if profile_row else None
@@ -1252,6 +1256,7 @@ class TaskService:
             source["prompt"], correction_text, len(details),
             [nail_id for _, nail_id, _ in details if nail_id],
         )
+        prompt_version = correction_prompt_version(source["prompt_version"])
         conn = self.db.conn()
         batch_id = new_batch_id()
         now = utcnow()
@@ -1310,13 +1315,18 @@ class TaskService:
                     frozen_correction.append(entry)
             # A correction re-sends the authority images the source used, so its
             # snapshot inherits them by digest rather than re-resolving them.
+            #
+            # Image 1 MUST be the previous candidate. GPT Image gives attachment
+            # order semantic weight; putting the plan first caused a real Hero
+            # correction to redraw the whole photograph and ignore the requested
+            # two-nail move. The contract is therefore:
+            #   previous candidate -> authority images -> detail crops.
             if source_snapshot:
                 authority = [
                     entry for entry in source_snapshot["snapshot"].get("input_assets", [])
                     if entry.get("role") in AUTHORITY_ROLES
                 ]
-                # Authority first, then the edit base, matching SOP v2+ ordering.
-                frozen_correction = [
+                frozen_authority = [
                     FrozenInput(
                         role=entry["role"], digest=entry["digest"], path=entry["path"],
                         byte_size=entry.get("byte_size", 0),
@@ -1326,12 +1336,21 @@ class TaskService:
                         derived_from=entry.get("derived_from"),
                     )
                     for entry in authority
-                ] + frozen_correction
+                ]
+                edit_base = [
+                    entry for entry in frozen_correction
+                    if entry.role == "correction_base"
+                ]
+                detail_inputs = [
+                    entry for entry in frozen_correction
+                    if entry.role == "correction_detail"
+                ]
+                frozen_correction = edit_base + frozen_authority + detail_inputs
             snapshot, fingerprint = self._snapshot_for(
                 conn, style=self.get_style(source["style_id"]),
                 output_type=source["output_type"], prompt=prompt,
                 negative_prompt=source["negative_prompt"],
-                prompt_version=source["prompt_version"],
+                prompt_version=prompt_version,
                 provider=provider_name, model=model,
                 size=self._size_for_correction(source),
                 profile_row=profile_row,
@@ -1356,10 +1375,10 @@ class TaskService:
                 (
                     new_id_, batch_id, source["style_id"], source["sku"],
                     source["output_type"], prompt, source["negative_prompt"],
-                    source["prompt_version"], provider_name, model, PENDING, 0,
+                    prompt_version, provider_name, model, PENDING, 0,
                     self.config.max_retries, price,
                     self.idempotency_key(source["style_id"], source["output_type"],
-                                         source["prompt_version"], prompt, batch_id),
+                                         prompt_version, prompt, batch_id),
                     None, now, now, root_task_id,
                     # The corrected task IS the parent — a correction chain is the
                     # deepest lineage this system produces, so its ancestry has to
@@ -1385,6 +1404,67 @@ class TaskService:
 
     # ---------------- task queries ----------------
 
+    def select_candidate(self, task_id: str, *, selected_by: str, note: str = "") -> dict:
+        """Persist the operator's current winner for one candidate lineage.
+
+        Selection is not approval. It only controls which image the Precision
+        workbench highlights and offers as the next correction base.
+        """
+        task = self.get_task(task_id, with_details=False)
+        if task["status"] != SUCCESS or not task.get("output_path"):
+            raise ConflictError("only a successful candidate with an image can be selected")
+        if not Path(task["output_path"]).is_file():
+            raise ConflictError("candidate image is missing from local storage")
+        root = task.get("root_task_id") or task_id
+        now = utcnow()
+        with transaction(self.db.conn()) as conn:
+            root_row = conn.execute(
+                "SELECT task_id FROM tasks WHERE task_id = ?", (root,)
+            ).fetchone()
+            if root_row is None:
+                raise ConflictError(f"candidate lineage root {root} no longer exists")
+            conn.execute(
+                "INSERT INTO candidate_selections "
+                "(root_task_id, selected_task_id, selected_by, note, selected_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(root_task_id) DO UPDATE SET "
+                "selected_task_id=excluded.selected_task_id, "
+                "selected_by=excluded.selected_by, note=excluded.note, "
+                "selected_at=excluded.selected_at",
+                (root, task_id, selected_by[:120], note.strip()[:300], now),
+            )
+        return {
+            "root_task_id": root,
+            "selected_task_id": task_id,
+            "selected_by": selected_by[:120],
+            "note": note.strip()[:300],
+            "selected_at": now,
+        }
+
+    def _candidate_versions(self, root_task_id: str) -> list[dict]:
+        rows = self.db.conn().execute(
+            "SELECT task_id, parent_task_id, lineage_depth, lineage_reason, output_type,"
+            " status, qa_state, review_state, output_path, error_code, created_at,"
+            " completed_at, input_fingerprint, metadata_json FROM tasks "
+            "WHERE root_task_id = ? OR task_id = ? "
+            "ORDER BY lineage_depth, created_at, task_id",
+            (root_task_id, root_task_id),
+        ).fetchall()
+        versions: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            metadata = json.loads(item.pop("metadata_json") or "{}")
+            item["version"] = int(metadata.get("version") or item["lineage_depth"] + 1)
+            item["generation_mode"] = metadata.get("generation_mode") or "batch"
+            item["correction_text"] = metadata.get("correction_text") or ""
+            item["detail_nails"] = metadata.get("correction_detail_nails") or []
+            item["image_available"] = bool(
+                item.get("output_path") and Path(item["output_path"]).is_file()
+            )
+            advisory = self._latest_qa(self.db.conn(), item["task_id"], "llm")
+            item["qa_advisory"] = advisory
+            versions.append(item)
+        return versions
+
     def lineage_for(self, task_id: str) -> dict:
         """Shared automatic-work budget for this task's lineage, plus the chain.
 
@@ -1395,6 +1475,12 @@ class TaskService:
         task = self.get_task(task_id, with_details=False)
         root = task.get("root_task_id") or task_id
         status = lineage_status(self.db, root)
+        selection = self.db.conn().execute(
+            "SELECT selected_task_id, selected_by, note, selected_at "
+            "FROM candidate_selections WHERE root_task_id = ?", (root,),
+        ).fetchone()
+        status["selection"] = dict(selection) if selection else None
+        status["candidates"] = self._candidate_versions(root)
         status["ancestors"] = self.ancestors_of(task_id)
         status["descendants"] = self.descendants_of(task_id)
         status["this_task"] = {
@@ -1483,7 +1569,16 @@ class TaskService:
             return None
         qa_doc = dict(row)
         qa_doc["issues"] = json.loads(qa_doc.pop("issues_json"))
-        qa_doc["checks"] = json.loads(qa_doc.pop("checks_json"))
+        stored_checks = json.loads(qa_doc.pop("checks_json"))
+        # qa.py stores the actual check map beside manual-review metadata. Expose
+        # the check map directly to API/UI callers while remaining compatible
+        # with older rows that already stored a flat map.
+        if isinstance(stored_checks, dict) and isinstance(stored_checks.get("checks"), dict):
+            qa_doc["checks"] = stored_checks["checks"]
+            qa_doc["manual_review_items"] = stored_checks.get("manual_review_items", [])
+        else:
+            qa_doc["checks"] = stored_checks
+            qa_doc["manual_review_items"] = []
         return qa_doc
 
     def list_tasks(

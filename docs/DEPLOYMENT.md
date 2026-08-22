@@ -44,7 +44,7 @@ systemd 单元示例（`/etc/systemd/system/lunelle.service`）：
 
 ```ini
 [Unit]
-Description=Lunelle Studio
+Description=穿戴甲视觉生产系统
 After=network-online.target
 [Service]
 WorkingDirectory=/opt/lunelle-studio

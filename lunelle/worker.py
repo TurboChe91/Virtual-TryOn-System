@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
 import logging
 import os
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from PIL import Image
 
 from .assets import describe_inputs
 from .budget import (
@@ -419,10 +422,7 @@ class Worker:
             log.info("reference unavailable; stripped reference block from prompt",
                      ctx={"stage": "reference"})
         size = plan.size
-        extra: dict[str, str] = {}
-        if task["output_type"] == OUTPUT_HERO and task["model"].startswith("gpt-image"):
-            # Listing heroes are final assets; draft tiers are chosen per profile model.
-            extra = {"quality": "high", "output_format": "png"}
+        extra = _image_request_extra(task)
         request = GenerationRequest(
             prompt=prompt,
             negative_prompt=task["negative_prompt"],
@@ -541,10 +541,28 @@ class Worker:
                      actual_usd=result.actual_cost_usd)
         sync_lineage_spend(self.db, root_task_id)
 
-        # Persist the image before declaring success.
+        # Persist the image before declaring success.  Providers can return JPEG,
+        # WebP or PNG, but output_file_for deliberately promises a PNG path to every
+        # downstream crop, QA and export consumer.  Enforce that invariant here.
         output_path = self.service.output_file_for(task, attempt_no)
         try:
-            _atomic_write(output_path, result.image_bytes)
+            output_bytes = _normalized_png(result.image_bytes)
+        except (OSError, ValueError) as exc:
+            code = "invalid_response"
+            self.service.finish_attempt(
+                task["task_id"], attempt_no, outcome="error", duration_ms=duration_ms,
+                external_request_id=result.external_request_id,
+                error_code=code, error_message=str(exc), reference_used=result.reference_used,
+                # Charged even though the returned body was not a readable image.
+                cost_usd=result.actual_cost_usd,
+            )
+            self.service.complete_failure(
+                task["task_id"], error_code=code,
+                error_message=f"provider returned unreadable image data: {exc}", retryable=False,
+            )
+            return
+        try:
+            _atomic_write(output_path, output_bytes)
         except OSError as exc:
             code = "disk_full" if exc.errno == errno.ENOSPC else "file_write_failed"
             self.service.finish_attempt(
@@ -575,7 +593,8 @@ class Worker:
                 "attempt_no": attempt_no,
                 "reference_used": result.reference_used,
                 "response_meta": result.response_meta,
-                "image_sha256": hashlib.sha256(result.image_bytes).hexdigest(),
+                "image_sha256": hashlib.sha256(output_bytes).hexdigest(),
+                "stored_image_format": "png",
                 "api_profile": active_profile["name"] if active_profile else None,
             },
         )
@@ -720,18 +739,18 @@ class Worker:
         authority = resolved.first("view_plan", "design_plan", "grid", "style_reference")
         if authority is not None:
             images.append(authority)
-        # Image 3 = the immutable base hand photo, also as sent. Without it the judge
+        # Image 3 = the immutable pose/photography authority, also as sent. Without it the judge
         # cannot see that the hand was stretched, which is the one defect a human
         # spots instantly. Only this view's nails are in frame, so pass that list too
         # rather than letting the judge assume 10.
         visible_nails: list[str] | None = None
-        if task["output_type"] == OUTPUT_MATRIX_CELL:
+        if task["output_type"] in (OUTPUT_HERO, OUTPUT_MATRIX_CELL):
             metadata = task.get("metadata") or {}
             view = metadata.get("view")
-            base_hand = resolved.first("base_hand")
-            if base_hand is not None:
-                images.append(base_hand)
-            if view:
+            pose_reference = resolved.first("photography_reference", "base_hand")
+            if pose_reference is not None:
+                images.append(pose_reference)
+            if task["output_type"] == OUTPUT_MATRIX_CELL and view:
                 visible_nails = matrix_visible_nails(view)
         try:
             verdict = auto_qa_verdict(chat, images, style.get("identity_text") or "",
@@ -849,6 +868,37 @@ class Worker:
         if task["output_type"] == OUTPUT_HERO:
             return self.config.hero_size
         return self.config.wearing_size
+
+
+def _image_request_extra(task: dict) -> dict[str, str]:
+    if task["output_type"] != OUTPUT_HERO or not task["model"].startswith("gpt-image"):
+        return {}
+    # Listing heroes are final assets, so keep the high quality tier. GPT Image
+    # returns image data inside base64 JSON; asking it to transfer a compressed
+    # JPEG makes that response substantially smaller and less likely to be cut off
+    # by a long-lived proxy connection. The worker normalizes it back to PNG.
+    return {
+        "quality": "high",
+        "output_format": "jpeg",
+        "output_compression": "90",
+    }
+
+
+def _normalized_png(data: bytes) -> bytes:
+    """Decode provider bytes and return a real PNG artifact.
+
+    Do not trust a filename or Content-Type here: compatible gateways sometimes
+    return a different image encoding from the one requested.  Pillow verifies
+    that the complete payload is decodable before the task can become successful.
+    """
+    with Image.open(io.BytesIO(data)) as source:
+        source.load()
+        has_alpha = source.mode in {"RGBA", "LA"} or "transparency" in source.info
+        normalized = source.convert("RGBA" if has_alpha else "RGB")
+        buffer = io.BytesIO()
+        normalized.save(buffer, format="PNG", optimize=True)
+        return buffer.getvalue()
+
 
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

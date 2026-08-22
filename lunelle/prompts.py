@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from importlib import resources
 
@@ -363,6 +364,23 @@ Hard constraints:
 # carry set-wide COUNT LOCKS ("exactly two gothic opals in the whole image") —
 # count locks are what stop collateral damage on untouched nails.
 
+CORRECTION_PROMPT_VERSION = "cr-3"
+
+
+def correction_prompt_version(base_version: str) -> str:
+    """Attach one correction-contract version without accumulating suffixes."""
+    return f"{re.sub(r'\+cr-\d+$', '', base_version)}+{CORRECTION_PROMPT_VERSION}"
+
+
+def _shift_image_references(prompt: str) -> str:
+    """Account for the edit base prepended to the source prompt's attachments."""
+    return re.sub(
+        r"\b(Image|IMAGE) (\d+)\b",
+        lambda match: f"{match.group(1)} {int(match.group(2)) + 1}",
+        prompt,
+    )
+
+
 def build_correction_prompt(
     base_prompt: str,
     correction_text: str,
@@ -375,18 +393,22 @@ def build_correction_prompt(
         if named else ""
     )
     detail_note = (
-        f" After it come {detail_count} enlarged single-nail detail reference(s); "
+        f" After the authority image(s) come {detail_count} enlarged single-nail "
+        f"detail reference(s); "
         f"use each ONLY for its explicitly named correction slot.{identity}"
         if detail_count else ""
     )
     header = f"""HIGHEST-PRIORITY ATTEMPT CORRECTION — this is a LOCAL EDIT, not a new generation:
 {correction_text.strip()}
 
-EDIT BASE: the image attached after the authority image(s) is the PREVIOUS CANDIDATE. It is the edit base that must be preserved: keep its photography, lighting, hands, and every nail that the correction does not explicitly name, pixel-faithful.{detail_note}
+ATTACHMENT CONTRACT: Image 1 is the PREVIOUS CANDIDATE and the locked edit base. Preserve Image 1's photography, lighting, hands, composition, and every nail that the correction does not explicitly name, pixel-faithful. The design and pose authority images follow Image 1; use them only to verify the requested correction, never as a new canvas.{detail_note}
 Apply ONLY the correction above. Do not re-style, re-pose, re-light, or improve anything else.
 
 """
-    return header + base_prompt
+    # The original prompt was written before correction_base became Image 1.
+    # Shift every original attachment number together, or the model sees two
+    # contradictory definitions for Image 1 and silently chooses one.
+    return header + _shift_image_references(base_prompt)
 
 
 def build_negative_prompt(spec: StyleSpec) -> str:

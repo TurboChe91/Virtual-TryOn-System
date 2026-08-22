@@ -59,6 +59,8 @@ class MockImageProvider(ImageProvider):
         #: Reference image paths per call, same reasoning: nail placement now rides
         #: on which file arrives as Image 1, so tests need to see it.
         self.requested_references: list[list[Path]] = []
+        #: Wire-level options such as GPT Image quality/format/compression.
+        self.requested_extras: list[dict[str, str]] = []
 
     @property
     def calls(self) -> int:
@@ -69,6 +71,7 @@ class MockImageProvider(ImageProvider):
         self._calls += 1
         self.requested_sizes.append((request.size[0], request.size[1]))
         self.requested_references.append(list(request.reference_images))
+        self.requested_extras.append(dict(request.extra))
         if self._fail_with is not None and (self._fail_times == 0 or self._calls <= self._fail_times):
             raise self._fail_with
 

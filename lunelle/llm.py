@@ -73,7 +73,7 @@ def build_llm_chat(config: Config, db: Database) -> ChatFn:
                 {"role": "user", "content": content},
             ],
             "temperature": 0,
-            "max_tokens": 2000,
+            "max_tokens": 4000,
         }
         try:
             with httpx.Client(timeout=120) as client:
@@ -230,10 +230,50 @@ or elongated hands/fingers as a defect.
 Output ONE JSON object only:
 {{"passed": true|false,
   "issues": ["<each concrete defect, naming the nail slot>"],
+  "nails": {{
+    "nail-01": {{"status": "pass|fail|uncertain", "issue": "", "confidence": 0.0}},
+    "<repeat for EVERY nail named in the count rule>": {{"status": "...", "issue": "...", "confidence": 0.0}}
+  }},
+  "hand_geometry": {{"status": "pass|fail|uncertain", "issues": []}},
+  "set_counts": {{"status": "pass|fail|uncertain", "issues": []}},
+  "target_nails": ["<ONLY failed nail IDs that correction should edit>"],
   "correction": "<if failed: the exact correction instruction for a locked-base local edit.
 Name ONLY the wrong slots, give set-wide motif COUNT LOCKS
 (e.g. 'exactly two gothic opals in the whole image'),
 and end with which nails must stay completely untouched. Empty string if passed.>"}}"""
+
+
+_NAIL_IDS = tuple(f"nail-{number:02d}" for number in range(1, 11))
+_QA_STATUSES = {"pass", "fail", "uncertain"}
+
+
+def _qa_status(value: object, *, default_issue: str = "") -> dict:
+    raw = value if isinstance(value, dict) else {}
+    status = str(raw.get("status") or "").strip().lower()
+    if status not in _QA_STATUSES:
+        passed = raw.get("passed")
+        status = "pass" if passed is True else "fail" if passed is False else "uncertain"
+    issue = str(raw.get("issue") or "").strip()
+    if not issue and isinstance(raw.get("issues"), list):
+        issue = "; ".join(str(item).strip() for item in raw["issues"] if str(item).strip())
+    if not issue:
+        issue = default_issue
+    confidence_value = raw.get("confidence")
+    confidence: float | None = None
+    if isinstance(confidence_value, (int, float, str)):
+        try:
+            confidence = max(0.0, min(1.0, float(confidence_value)))
+        except ValueError:
+            pass
+    return {"status": status, "issue": issue[:500], "confidence": confidence}
+
+
+def _qa_section(value: object) -> dict:
+    normalized = _qa_status(value)
+    return {
+        "status": normalized["status"],
+        "issues": [normalized["issue"]] if normalized["issue"] else [],
+    }
 
 
 def auto_qa_verdict(chat: ChatFn, images: list[Path], identity: str, output_type: str,
@@ -261,9 +301,54 @@ def auto_qa_verdict(chat: ChatFn, images: list[Path], identity: str, output_type
                                      count_rule=count_rule),
                  images)
     doc = extract_json(reply)
+    expected_nails = list(dict.fromkeys(visible_nails or _NAIL_IDS))
+    raw_nails = doc.get("nails")
+    nails: dict[str, dict] = {}
+    if isinstance(raw_nails, dict):
+        structured = True
+        for nail_id in expected_nails:
+            nails[nail_id] = _qa_status(
+                raw_nails.get(nail_id),
+                default_issue=("judge did not return this visible nail"
+                               if nail_id not in raw_nails else ""),
+            )
+    else:
+        structured = False
+
+    geometry = _qa_section(doc.get("hand_geometry"))
+    counts = _qa_section(doc.get("set_counts"))
+    issues = [str(item).strip() for item in doc.get("issues", []) if str(item).strip()]
+    if structured:
+        issues.extend(
+            f"{nail_id}: {entry['issue']}"
+            for nail_id, entry in nails.items()
+            if entry["status"] != "pass" and entry["issue"]
+        )
+    target_nails = [
+        str(item) for item in doc.get("target_nails", [])
+        if str(item) in expected_nails
+    ] if isinstance(doc.get("target_nails"), list) else []
+    if structured:
+        target_nails.extend(
+            nail_id for nail_id, entry in nails.items() if entry["status"] == "fail"
+        )
+    target_nails = list(dict.fromkeys(target_nails))
+
+    passed = bool(doc.get("passed"))
+    if structured:
+        passed = (
+            passed
+            and all(entry["status"] == "pass" for entry in nails.values())
+            and geometry["status"] == "pass"
+            and counts["status"] == "pass"
+        )
     return {
-        "passed": bool(doc.get("passed")),
-        "issues": [str(item) for item in doc.get("issues", []) if str(item).strip()][:20],
+        "passed": passed,
+        "issues": list(dict.fromkeys(issues))[:30],
+        "nails": nails,
+        "hand_geometry": geometry,
+        "set_counts": counts,
+        "target_nails": target_nails,
         "correction": str(doc.get("correction") or "").strip()[:2000],
     }
 

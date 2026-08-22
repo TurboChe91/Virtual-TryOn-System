@@ -140,3 +140,59 @@ class TestVerdictParsing:
         assert verdict["passed"] is False
         assert verdict["issues"] == ["slot 3 wrong"]
         assert verdict["correction"] == "fix slot 3"
+
+    def test_structured_verdict_normalizes_every_visible_nail_and_targets_failures(self):
+        chat = RecordingChat('''{
+          "passed": false,
+          "issues": ["nail-02 motif is wrong"],
+          "nails": {
+            "nail-01": {"status": "pass", "confidence": 0.98},
+            "nail-02": {"status": "fail", "issue": "wrong motif", "confidence": 1.5},
+            "nail-10": {"status": "fail", "issue": "not visible"}
+          },
+          "hand_geometry": {"status": "pass", "issues": []},
+          "set_counts": {"status": "pass", "issues": []},
+          "target_nails": ["nail-02", "nail-10"],
+          "correction": "Only correct nail-02."
+        }''')
+        verdict = auto_qa_verdict(
+            chat, [Path("c.png")], "", "matrix_cell",
+            visible_nails=["nail-01", "nail-02"],
+        )
+        assert set(verdict["nails"]) == {"nail-01", "nail-02"}
+        assert verdict["nails"]["nail-01"]["status"] == "pass"
+        assert verdict["nails"]["nail-02"]["status"] == "fail"
+        assert verdict["nails"]["nail-02"]["confidence"] == 1.0
+        assert verdict["target_nails"] == ["nail-02"]
+
+    def test_missing_visible_nail_is_uncertain_and_cannot_pass(self):
+        chat = RecordingChat('''{
+          "passed": true,
+          "nails": {"nail-01": {"status": "pass"}},
+          "hand_geometry": {"status": "pass"},
+          "set_counts": {"status": "pass"},
+          "target_nails": [],
+          "issues": [],
+          "correction": ""
+        }''')
+        verdict = auto_qa_verdict(
+            chat, [Path("c.png")], "", "matrix_cell",
+            visible_nails=["nail-01", "nail-02"],
+        )
+        assert verdict["passed"] is False
+        assert verdict["nails"]["nail-02"]["status"] == "uncertain"
+        assert "did not return" in verdict["nails"]["nail-02"]["issue"]
+
+    def test_structured_pass_requires_geometry_and_count_sections(self):
+        chat = RecordingChat('''{
+          "passed": true,
+          "nails": {"nail-01": {"status": "pass"}},
+          "hand_geometry": {"status": "fail", "issues": ["elongated finger"]},
+          "set_counts": {"status": "pass"},
+          "target_nails": [], "issues": [], "correction": "fix the hand"
+        }''')
+        verdict = auto_qa_verdict(
+            chat, [Path("c.png")], "", "matrix_cell", visible_nails=["nail-01"],
+        )
+        assert verdict["passed"] is False
+        assert verdict["hand_geometry"]["status"] == "fail"

@@ -157,6 +157,13 @@ class RetryRequest(BaseModel):
     note: str = Field(default="", max_length=200)
 
 
+class CandidateSelectRequest(BaseModel):
+    """Mark a successful image as the current winner of its candidate lineage."""
+
+    model_config = ConfigDict(extra="forbid")
+    note: str = Field(default="", max_length=300)
+
+
 class ReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     approved: bool = Field(...,

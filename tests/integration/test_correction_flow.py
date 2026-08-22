@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from lunelle.providers.mock import MockImageProvider
+from lunelle.snapshots import get_snapshot
 from lunelle.tasks import CORRECTION_BUDGET, ConflictError
 
 from .test_worker_flows import make_style, run_worker_until_settled
@@ -32,12 +33,23 @@ class TestCorrectionLoop:
         assert v2["metadata"]["correction_of"] == v1["task_id"]
         assert "HIGHEST-PRIORITY ATTEMPT CORRECTION" in v2["prompt"]
         assert "LOCAL EDIT" in v2["prompt"]
-        assert v2["prompt"].endswith(v1["prompt"])  # base prompt preserved verbatim
+        assert "Image 1 is the PREVIOUS CANDIDATE" in v2["prompt"]
+        assert v2["prompt_version"].endswith("+cr-3")
+        roles = [
+            item["role"]
+            for item in get_snapshot(db, v2["task_id"])["snapshot"]["input_assets"]
+        ]
+        assert roles[0] == "correction_base"
 
         run_worker_until_settled(config, db, service, MockImageProvider(allowed=True))
         done = settled_success(service, v2["task_id"])
         # The previous candidate rode along as a reference image.
         assert done["metadata"]["reference_used"] is True
+
+        branched = service.create_correction(
+            v1["task_id"], correction_text="Branch again from v1 without overwriting v2."
+        )
+        assert branched["metadata"]["version"] == 3
 
     def test_correction_requires_success_and_text(self, config, db, service):
         style = make_style(service, name="Guard", description="green oval nails")

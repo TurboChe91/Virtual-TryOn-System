@@ -38,6 +38,7 @@ from .profiles import ProfileService
 from .providers import build_chat_fn, build_provider
 from .qa import run_qa
 from .schemas import (
+    CandidateSelectRequest,
     CloudflareConfigRequest,
     ExportRequest,
     GenerateRequest,
@@ -118,7 +119,7 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
             if not worker.is_alive():
                 db.close_all()
 
-    app = FastAPI(title="Lunelle Studio", version=__version__, lifespan=lifespan,
+    app = FastAPI(title="穿戴甲视觉生产系统", version=__version__, lifespan=lifespan,
                   docs_url="/docs" if not config.is_production else None,
                   redoc_url=None)
 
@@ -742,6 +743,14 @@ def create_app(config: Config | None = None, *, start_worker: bool = True) -> Fa
         the budget ran out rather than because something broke.
         """
         return request.app.state.service.lineage_for(task_id)
+
+    @app.post("/api/tasks/{task_id}/select-candidate",
+              dependencies=[Depends(require_admin)])
+    def select_candidate(task_id: str, body: CandidateSelectRequest, request: Request):
+        """Choose the best successful candidate without granting publish approval."""
+        return request.app.state.service.select_candidate(
+            task_id, selected_by=_reviewer_from(request), note=body.note,
+        )
 
     @app.get("/api/tasks")
     def list_tasks(request: Request,

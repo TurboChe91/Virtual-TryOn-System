@@ -11,11 +11,13 @@ Two defects, both in how tasks relate to each other:
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from lunelle.providers.base import ProviderError
 from lunelle.providers.mock import MockImageProvider
 from lunelle.server import create_app
+from lunelle.tasks import ConflictError
 from tests.conftest import make_config
 from tests.integration.test_worker_flows import make_style, run_worker_until_settled
 
@@ -188,6 +190,40 @@ class TestDependencyPropagation:
 
 
 class TestRepairLineage:
+    def test_precision_workbench_lists_and_selects_any_successful_version(
+        self, config, db, service,
+    ):
+        style = make_style(service)
+        root = service.create_generation(style["style_id"], ["grid"]).created[0]["task_id"]
+        run_worker_until_settled(config, db, service, MockImageProvider(allowed=True))
+        child = service.create_correction(root, correction_text="Only correct nail-03.")
+        run_worker_until_settled(config, db, service, MockImageProvider(allowed=True))
+
+        first = service.select_candidate(root, selected_by="owner", note="best lighting")
+        assert first["selected_task_id"] == root
+        selected = service.select_candidate(
+            child["task_id"], selected_by="owner", note="better nail-03"
+        )
+        assert selected["selected_task_id"] == child["task_id"]
+
+        workbench = service.lineage_for(root)
+        assert workbench["selection"]["selected_task_id"] == child["task_id"]
+        assert workbench["selection"]["note"] == "better nail-03"
+        assert [item["task_id"] for item in workbench["candidates"]] == [
+            root, child["task_id"],
+        ]
+        assert [item["version"] for item in workbench["candidates"]] == [1, 2]
+        assert workbench["candidates"][1]["correction_text"] == "Only correct nail-03."
+        # "Best" is an editing choice, never a shortcut through the publish gate.
+        assert service.get_task(child["task_id"], with_details=False)["review_state"] \
+            == "waiting_human_review"
+
+    def test_pending_or_missing_candidate_cannot_be_selected(self, config, db, service):
+        style = make_style(service)
+        task_id = service.create_generation(style["style_id"], ["grid"]).created[0]["task_id"]
+        with pytest.raises(ConflictError, match="successful candidate"):
+            service.select_candidate(task_id, selected_by="owner")
+
     def test_correction_records_parent_and_depth(self, config, db, service):
         style = make_style(service)
         plan = service.create_generation(style["style_id"], ["grid"])
@@ -301,6 +337,8 @@ class TestRepairLineage:
             assert body["this_task"]["lineage_depth"] == 0
             assert body["this_task"]["parent_task_id"] is None
             assert body["this_task"]["lineage_reason"] == "operator_request"
+            assert len(body["candidates"]) == 1
+            assert body["selection"] is None
             assert body["ancestors"] == []
             assert body["descendants"] == []
 
