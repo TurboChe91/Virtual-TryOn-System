@@ -234,3 +234,11 @@ git pull && ./scripts/setup.sh && 重启服务      # 迁移自动应用
 `docs/PRODUCTION_CHECKLIST.md`、`docs/TROUBLESHOOTING.md`、
 `docs/BACKUP_AND_RECOVERY.md`、`docs/SECURITY.md`、`docs/API.md`、
 `docs/CURRENT_STATE.md`
+
+## 许可证
+
+本仓库公开源码主要用于作品展示、学习和技术评估。
+
+未经授权，不允许将本项目或其主要代码用于商业产品、付费服务、转售或重新打包发布。
+
+具体条款见 [LICENSE](./LICENSE)。
